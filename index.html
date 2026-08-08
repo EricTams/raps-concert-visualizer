@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Raptor &amp; The Screechers</title>
+<style>
+  :root { color-scheme: dark; }
+  html, body {
+    margin: 0; padding: 0;
+    width: 100%; height: 100%;
+    background: #000; overflow: hidden;
+  }
+  body.idle { cursor: none; }
+  canvas#stage {
+    display: block;
+    width: 100vw; height: 100vh;
+    background: #000;
+  }
+  #hud {
+    position: fixed; left: 16px; bottom: 14px;
+    font: 500 13px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+    color: rgba(255,255,255,.82);
+    text-shadow: 0 1px 3px rgba(0,0,0,.9);
+    background: rgba(0,0,0,.45);
+    padding: 6px 10px; border-radius: 5px;
+    pointer-events: none; white-space: pre;
+    display: none;
+  }
+  #hud.on { display: block; }
+  #debug {
+    position: fixed; inset: 0;
+    display: none;
+    place-content: center;
+    background: rgba(0,0,0,.72);
+    backdrop-filter: blur(6px);
+    font: 400 13px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace;
+    color: #e6e6e6;
+    padding: 4vh 4vw;
+    overflow: auto;
+  }
+  #debug.on { display: grid; }
+  #debug .panel {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+    gap: 26px 40px;
+    max-width: 1000px;
+  }
+  #debug h2 {
+    font: 600 11px/1 ui-monospace, Menlo, monospace;
+    letter-spacing: .14em; text-transform: uppercase;
+    color: #8d8d8d; margin: 0 0 10px;
+  }
+  #debug ul { list-style: none; margin: 0; padding: 0; }
+  #debug li {
+    display: flex; gap: 10px; align-items: baseline;
+    padding: 2px 6px; border-radius: 4px;
+    white-space: nowrap;
+  }
+  #debug li.active { background: rgba(255,255,255,.14); color: #fff; }
+  #debug kbd {
+    display: inline-block; min-width: 1.9em; text-align: center;
+    padding: 1px 5px; border-radius: 3px;
+    background: rgba(255,255,255,.13);
+    border: 1px solid rgba(255,255,255,.16);
+    font: inherit; font-size: 11px; color: #fff;
+    flex: none;
+  }
+  #debug .name { overflow: hidden; text-overflow: ellipsis; }
+  #debug .now {
+    grid-column: 1 / -1;
+    border-top: 1px solid rgba(255,255,255,.14);
+    padding-top: 14px; color: #9d9d9d; white-space: pre-wrap;
+  }
+  #fatal {
+    position: fixed; inset: 0;
+    display: none; place-content: center; align-content: center;
+    text-align: center;
+    font: 400 15px/1.6 ui-monospace, Menlo, monospace;
+    color: #d8d8d8; padding: 8vw;
+  }
+  #fatal.on { display: grid; }
+</style>
+</head>
+<body>
+  <canvas id="stage"></canvas>
+  <div id="hud"></div>
+  <div id="debug"><div class="panel"></div></div>
+  <div id="fatal"></div>
+  <script type="module" src="./src/show.js"></script>
+</body>
+</html>

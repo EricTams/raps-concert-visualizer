@@ -1,0 +1,551 @@
+// ---------------------------------------------------------------------------
+// The show: asset loading, scheduling, rendering, and operator controls.
+// ---------------------------------------------------------------------------
+
+import { SETLIST, SLOT_SECONDS, TRANSITION_SECONDS, FRAMING, INTENSITY } from '../config.js';
+import { EFFECTS, EFFECT_NAMES } from './effects.js';
+import { TRANSITIONS, transitionFor } from './transitions.js';
+import { createContext, createScreenQuad, createTexture, draw, bindScreen, Program, Framebuffer } from './gl.js';
+
+// --- URL overrides ---------------------------------------------------------
+
+const params = new URLSearchParams(location.search);
+const num = (key, fallback) => {
+  const v = parseFloat(params.get(key));
+  return Number.isFinite(v) ? v : fallback;
+};
+
+const opts = {
+  slotDur: Math.max(1, num('dur', SLOT_SECONDS)),
+  transDur: Math.max(0.2, num('trans', TRANSITION_SECONDS)),
+  intensity: num('intensity', INTENSITY),
+  fixedOrder: params.get('order') === 'fixed',
+  hud: params.get('hud') === '1',
+  lockedEffect: (() => {
+    const raw = params.get('fx');
+    if (!raw) return null;
+    if (EFFECT_NAMES.includes(raw)) return raw;
+    const i = parseInt(raw, 10);
+    return Number.isInteger(i) ? EFFECT_NAMES[((i % EFFECT_NAMES.length) + EFFECT_NAMES.length) % EFFECT_NAMES.length] : null;
+  })(),
+};
+opts.transDur = Math.min(opts.transDur, opts.slotDur * 0.5);
+
+// --- DOM -------------------------------------------------------------------
+
+const canvas = document.getElementById('stage');
+const hudEl = document.getElementById('hud');
+const debugEl = document.getElementById('debug');
+const fatalEl = document.getElementById('fatal');
+
+function fatal(message) {
+  fatalEl.textContent = message;
+  fatalEl.classList.add('on');
+  console.error(message);
+}
+
+// --- Deterministic per-slot randomness -------------------------------------
+
+const runSeed = Math.floor(Math.random() * 1e9);
+function hashInt(n) {
+  let x = (n ^ runSeed) >>> 0;
+  x = Math.imul(x ^ (x >>> 16), 2246822507);
+  x = Math.imul(x ^ (x >>> 13), 3266489909);
+  return ((x ^ (x >>> 16)) >>> 0) / 4294967296;
+}
+
+// --- Asset loading ---------------------------------------------------------
+
+const covers = SETLIST.map((entry) => ({ ...entry, image: null, backdrop: null, texture: null, bgTexture: null, ok: false }));
+
+/**
+ * A tiny downscale of the cover. Magnified back up with linear filtering it
+ * becomes a smooth blur for free — no blur pass, no mipmaps, no extra draw.
+ * Downscaled in two steps because a single huge reduction aliases badly.
+ */
+function makeBackdrop(img) {
+  const step = document.createElement('canvas');
+  step.width = step.height = 192;
+  const sc = step.getContext('2d');
+  sc.imageSmoothingEnabled = true;
+  sc.imageSmoothingQuality = 'high';
+  sc.drawImage(img, 0, 0, 192, 192);
+
+  const out = document.createElement('canvas');
+  out.width = out.height = 48;
+  const oc = out.getContext('2d');
+  oc.imageSmoothingEnabled = true;
+  oc.imageSmoothingQuality = 'high';
+  oc.drawImage(step, 0, 0, 48, 48);
+  return out;
+}
+
+async function loadCovers() {
+  await Promise.all(covers.map(async (cover) => {
+    try {
+      const img = new Image();
+      img.decoding = 'async';
+      img.src = cover.file;
+      await img.decode();
+      cover.image = img;
+      cover.backdrop = makeBackdrop(img);
+      cover.ok = true;
+    } catch (err) {
+      console.warn(`Skipping "${cover.title}" — could not load ${cover.file}`, err);
+    }
+  }));
+  return covers.filter((c) => c.ok);
+}
+
+// --- Play order ------------------------------------------------------------
+//
+// `sequence` is an ever-growing list of indices into `playable`. It is extended
+// one shuffled cycle at a time, so every cover shows once per cycle and no
+// cover ever plays twice in a row across a cycle boundary.
+
+let playable = [];
+const sequence = [];
+let cycleCount = 0;
+
+function shuffledCycle() {
+  const cycle = playable.map((_, i) => i);
+  if (opts.fixedOrder) return cycle;
+  for (let i = cycle.length - 1; i > 0; i--) {
+    const j = Math.floor(hashInt(cycleCount * 1013 + i * 7) * (i + 1));
+    [cycle[i], cycle[j]] = [cycle[j], cycle[i]];
+  }
+  return cycle;
+}
+
+function ensureSequence(upTo) {
+  while (sequence.length <= upTo) {
+    const cycle = shuffledCycle();
+    cycleCount++;
+    const last = sequence[sequence.length - 1];
+    if (cycle.length > 1 && last !== undefined && cycle[0] === last) {
+      [cycle[0], cycle[1]] = [cycle[1], cycle[0]];
+    }
+    sequence.push(...cycle);
+  }
+}
+
+const coverAt = (pos) => playable[sequence[pos]];
+const seedAt = (pos) => hashInt(pos * 2654435761);
+
+// Set from the Tab panel or ?fx=; overrides whatever the setlist assigns.
+let effectOverride = opts.lockedEffect;
+
+function effectAt(pos) {
+  if (effectOverride) return effectOverride;
+  const fx = coverAt(pos).fx;
+  if (fx && EFFECTS[fx]) return fx;
+  return EFFECT_NAMES[Math.floor(seedAt(pos) * EFFECT_NAMES.length) % EFFECT_NAMES.length];
+}
+
+// --- GL resources ----------------------------------------------------------
+
+let gl = null;
+let effectPrograms = new Map();
+let transitionPrograms = new Map();
+let fboA = null;
+let fboB = null;
+
+function buildGL() {
+  gl = createContext(canvas);
+  createScreenQuad(gl);
+  gl.disable(gl.DEPTH_TEST);
+  gl.disable(gl.BLEND);
+  gl.clearColor(0, 0, 0, 1);
+
+  effectPrograms = new Map();
+  for (const [name, src] of Object.entries(EFFECTS)) {
+    effectPrograms.set(name, new Program(gl, src, `effect:${name}`));
+  }
+  transitionPrograms = new Map();
+  for (const [name, src] of Object.entries(TRANSITIONS)) {
+    transitionPrograms.set(name, new Program(gl, src, `transition:${name}`));
+  }
+
+  for (const cover of playable) {
+    cover.texture = createTexture(gl, cover.image);
+    cover.bgTexture = createTexture(gl, cover.backdrop);
+  }
+
+  fboA = new Framebuffer(gl, 2, 2);
+  fboB = new Framebuffer(gl, 2, 2);
+  resize(true);
+}
+
+
+// --- Sizing and adaptive resolution ----------------------------------------
+
+const SCALE_STEPS = [1.0, 0.8, 0.65, 0.5];
+let scaleStep = 0;
+let width = 2;
+let height = 2;
+
+function resize(force = false) {
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const scale = SCALE_STEPS[scaleStep];
+  const w = Math.max(2, Math.round(canvas.clientWidth * dpr * scale));
+  const h = Math.max(2, Math.round(canvas.clientHeight * dpr * scale));
+  if (!force && w === width && h === height) return;
+  width = w;
+  height = h;
+  canvas.width = w;
+  canvas.height = h;
+  fboA.resize(w, h);
+  fboB.resize(w, h);
+}
+
+let slowFrames = 0;
+let scaleCooldown = 0;
+
+function trackPerformance(dtMs) {
+  if (scaleCooldown > 0) { scaleCooldown--; return; }
+  if (dtMs > 22 && scaleStep < SCALE_STEPS.length - 1) {
+    if (++slowFrames >= 60) {
+      scaleStep++;
+      slowFrames = 0;
+      scaleCooldown = 180;
+      console.info(`Render scale reduced to ${SCALE_STEPS[scaleStep]} to hold frame rate.`);
+      resize(true);
+    }
+  } else {
+    slowFrames = Math.max(0, slowFrames - 1);
+  }
+}
+
+// --- Clock and scheduling --------------------------------------------------
+
+let clockTime = 0;     // never stops; drives the shader animation
+let showTime = 0;      // scheduling clock; frozen while held
+let slotStart = 0;     // showTime at which the current slot began
+let pos = 0;           // index into `sequence`
+let pendingPos = null; // target while a transition is running
+let held = false;
+let running = false;
+
+const songTime = () => showTime - slotStart;
+const transitionStart = () => opts.slotDur - opts.transDur;
+const isTransitioning = () => pendingPos !== null && songTime() >= transitionStart();
+
+function goTo(targetPos) {
+  if (targetPos < 0) return;
+  ensureSequence(targetPos);
+  pendingPos = targetPos;
+  slotStart = showTime - transitionStart();
+}
+
+function commitAdvance() {
+  pos = pendingPos;
+  pendingPos = null;
+  slotStart += opts.slotDur;
+  ensureSequence(pos + 1);
+}
+
+// --- Rendering -------------------------------------------------------------
+
+function renderEffect(atPos, songT, target) {
+  const cover = coverAt(atPos);
+  const prog = effectPrograms.get(effectAt(atPos));
+  if (target) target.bind(); else bindScreen(gl, width, height);
+  prog.use()
+    .tex('u_tex', cover.texture, 0)
+    .tex('u_bg', cover.bgTexture, 1)
+    .v2('u_resolution', width, height)
+    .f('u_time', clockTime)
+    .f('u_songTime', songT)
+    .f('u_progress', songT / opts.slotDur)
+    .f('u_slotDur', opts.slotDur)
+    .f('u_intensity', opts.intensity)
+    .f('u_seed', seedAt(atPos))
+    .v4('u_framing', FRAMING.fit, FRAMING.breathe, FRAMING.backdropDim, FRAMING.backdropZoom);
+  draw(gl);
+}
+
+function renderFrame() {
+  const t = songTime();
+
+  if (!isTransitioning()) {
+    renderEffect(pos, t, null);
+    return;
+  }
+
+  // Outgoing at its own slot time; incoming counts up to zero, so it arrives
+  // clean and its effect grows in once the handoff completes.
+  renderEffect(pos, t, fboA);
+  renderEffect(pendingPos, t - opts.slotDur, fboB);
+
+  const mix = (t - transitionStart()) / opts.transDur;
+  const prog = transitionPrograms.get(transitionFor(effectAt(pendingPos)));
+  bindScreen(gl, width, height);
+  prog.use()
+    .tex('u_from', fboA.texture, 0)
+    .tex('u_to', fboB.texture, 1)
+    .f('u_t', Math.min(1, Math.max(0, mix)))
+    .v2('u_resolution', width, height)
+    .f('u_time', clockTime)
+    .f('u_seed', seedAt(pendingPos));
+  draw(gl);
+}
+
+// --- Main loop -------------------------------------------------------------
+
+let lastFrame = 0;
+let rafId = 0;
+
+function tick(now) {
+  rafId = requestAnimationFrame(tick);
+  const dtMs = lastFrame ? now - lastFrame : 16.7;
+  lastFrame = now;
+
+  const dt = Math.min(dtMs, 100) / 1000;
+  clockTime += dt;
+  // Holding freezes the schedule but not the animation, so a held image keeps
+  // moving instead of looking like a crashed machine. A hold pressed mid-
+  // transition still lets that transition finish before it takes effect.
+  if (!held || isTransitioning()) showTime += dt;
+
+  // A slot with no pending target queues the automatic advance.
+  if (pendingPos === null && songTime() >= transitionStart()) {
+    ensureSequence(pos + 1);
+    pendingPos = pos + 1;
+  }
+  if (pendingPos !== null && songTime() >= opts.slotDur) commitAdvance();
+
+  resize();
+  renderFrame();
+  trackPerformance(dtMs);
+  updateHud();
+  if (debugOn && hudTick % 10 === 0) updateDebugPanel();
+}
+
+function start() {
+  if (running) return;
+  running = true;
+  lastFrame = 0;
+  rafId = requestAnimationFrame(tick);
+}
+
+function stop() {
+  running = false;
+  cancelAnimationFrame(rafId);
+}
+
+// --- HUD -------------------------------------------------------------------
+
+let hudOn = opts.hud;
+let hudTick = 0;
+
+function updateHud() {
+  hudTick++;
+  if (!hudOn || hudTick % 10) return;
+  const remaining = Math.max(0, opts.slotDur - songTime());
+  const target = pendingPos !== null ? ` -> ${coverAt(pendingPos).title}` : '';
+  hudEl.textContent =
+    `${coverAt(pos).title}\n` +
+    `${effectAt(pos)}  ${remaining.toFixed(0)}s${held ? '  [HELD]' : ''}${target}\n` +
+    `${width}x${height} @ ${SCALE_STEPS[scaleStep]}x`;
+}
+
+function setHud(on) {
+  hudOn = on;
+  hudEl.classList.toggle('on', on);
+  if (!on) hudEl.textContent = '';
+}
+
+// --- Debug panel -----------------------------------------------------------
+//
+// Tab opens a cheat-sheet listing every cover and every shader with the key
+// that selects it, so the whole library can be flipped through and judged
+// without touching the code.
+
+const EFFECT_KEYS = ['q', 'w', 'e', 'r', 't', 'y', 'u', 'i'];
+let debugOn = false;
+
+function buildDebugPanel() {
+  const panel = debugEl.querySelector('.panel');
+  const list = (heading, items) =>
+    `<div><h2>${heading}</h2><ul>${items.map(
+      ({ key, name, id }) =>
+        `<li data-id="${id}"><kbd>${key}</kbd><span class="name">${name}</span></li>`
+    ).join('')}</ul></div>`;
+
+  panel.innerHTML =
+    list('Cover', playable.map((c, i) => ({
+      key: i + 1, name: c.title, id: `cover:${i}`,
+    }))) +
+    list('Shader', EFFECT_NAMES.map((name, i) => ({
+      key: EFFECT_KEYS[i] || '-', name, id: `fx:${name}`,
+    }))) +
+    list('Show', [
+      { key: '0', name: 'shader back to setlist', id: 'x0' },
+      { key: '→', name: 'next cover', id: 'x1' },
+      { key: '←', name: 'previous cover', id: 'x2' },
+      { key: 'P', name: 'hold / release', id: 'x3' },
+      { key: 'F', name: 'fullscreen', id: 'x4' },
+      { key: 'H', name: 'small overlay', id: 'x5' },
+      { key: '[ ]', name: 'intensity down / up', id: 'x6' },
+      { key: '⇥', name: 'close this panel', id: 'x7' },
+    ]) +
+    '<div class="now"></div>';
+}
+
+function updateDebugPanel() {
+  if (!debugOn) return;
+  const activeCover = `cover:${sequence[pos]}`;
+  const activeFx = `fx:${effectAt(pos)}`;
+  for (const li of debugEl.querySelectorAll('li')) {
+    const id = li.dataset.id;
+    li.classList.toggle('active', id === activeCover || id === activeFx);
+  }
+  const remaining = Math.max(0, opts.slotDur - songTime());
+  debugEl.querySelector('.now').textContent =
+    `${coverAt(pos).title} — ${effectAt(pos)}` +
+    `${effectOverride ? ' (locked)' : ''}${held ? ' — HELD' : ''}\n` +
+    `${remaining.toFixed(0)}s left of ${opts.slotDur}s` +
+    `${pendingPos !== null ? `, transitioning via ${transitionFor(effectAt(pendingPos))} to ${coverAt(pendingPos).title}` : ''}\n` +
+    `intensity ${opts.intensity.toFixed(2)} · ${width}×${height} @ ${SCALE_STEPS[scaleStep]}×`;
+}
+
+function setDebug(on) {
+  debugOn = on;
+  debugEl.classList.toggle('on', on);
+  updateDebugPanel();
+}
+
+/** Jump to the next upcoming slot showing setlist entry `wanted`. */
+function jumpToCover(wanted) {
+  let target = pos + 1;
+  ensureSequence(target + playable.length * 2);
+  for (let i = 0; i < playable.length * 2; i++) {
+    if (sequence[target + i] === wanted) { target += i; break; }
+  }
+  goTo(target);
+}
+
+// --- Controls --------------------------------------------------------------
+
+function toggleFullscreen() {
+  if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+  else document.documentElement.requestFullscreen().catch(() => {});
+}
+
+function installControls() {
+  window.addEventListener('keydown', (e) => {
+    if (e.metaKey || e.ctrlKey || e.altKey) return;
+    const k = e.key.toLowerCase();
+
+    if (e.key === 'Tab') { e.preventDefault(); setDebug(!debugOn); return; }
+
+    const fxIndex = EFFECT_KEYS.indexOf(k);
+    if (fxIndex >= 0 && fxIndex < EFFECT_NAMES.length) {
+      effectOverride = EFFECT_NAMES[fxIndex];
+      updateDebugPanel();
+      return;
+    }
+
+    switch (k) {
+      case 'arrowright': case ' ':
+        e.preventDefault(); if (!isTransitioning()) goTo(pos + 1); break;
+      case 'arrowleft':
+        e.preventDefault(); if (!isTransitioning() && pos > 0) goTo(pos - 1); break;
+      case 'p': held = !held; break;
+      case 'f': toggleFullscreen(); break;
+      case 'h': setHud(!hudOn); break;
+      case '0': effectOverride = null; updateDebugPanel(); break;
+      case '[': opts.intensity = Math.max(0, opts.intensity - 0.1); updateDebugPanel(); break;
+      case ']': opts.intensity = Math.min(2, opts.intensity + 0.1); updateDebugPanel(); break;
+      default: {
+        const n = parseInt(k, 10);
+        if (Number.isInteger(n) && n >= 1 && n <= playable.length && !isTransitioning()) {
+          jumpToCover(n - 1);
+        }
+      }
+    }
+  });
+
+  // Single click advances; double click toggles fullscreen without also
+  // advancing twice.
+  let clickTimer = 0;
+  canvas.addEventListener('click', () => {
+    clearTimeout(clickTimer);
+    clickTimer = setTimeout(() => { if (!isTransitioning()) goTo(pos + 1); }, 250);
+  });
+  canvas.addEventListener('dblclick', () => {
+    clearTimeout(clickTimer);
+    toggleFullscreen();
+  });
+
+  window.addEventListener('resize', () => resize(true));
+
+  // Recover rather than die if the GPU drops the context mid-set.
+  canvas.addEventListener('webglcontextlost', (e) => {
+    e.preventDefault();
+    stop();
+    console.warn('WebGL context lost — waiting for restore.');
+  });
+  canvas.addEventListener('webglcontextrestored', () => {
+    console.warn('WebGL context restored — rebuilding.');
+    try { buildGL(); start(); }
+    catch (err) { fatal(`Could not rebuild after GPU context loss.\n\n${err.message}`); }
+  });
+
+  // Idle cursor.
+  let idleTimer = 0;
+  const wake = () => {
+    document.body.classList.remove('idle');
+    clearTimeout(idleTimer);
+    idleTimer = setTimeout(() => document.body.classList.add('idle'), 2000);
+  };
+  window.addEventListener('mousemove', wake);
+  wake();
+}
+
+// --- Keep the display awake for the length of the set ----------------------
+
+async function keepAwake() {
+  if (!('wakeLock' in navigator)) return;
+  let lock = null;
+  const acquire = async () => {
+    try { lock = await navigator.wakeLock.request('screen'); }
+    catch { /* denied or unsupported; the show still runs */ }
+  };
+  await acquire();
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible' && (!lock || lock.released)) acquire();
+  });
+}
+
+// --- Boot ------------------------------------------------------------------
+
+async function main() {
+  playable = await loadCovers();
+  if (playable.length === 0) {
+    fatal('No cover images could be loaded. Check that the images/ folder shipped with the page.');
+    return;
+  }
+
+  try {
+    buildGL();
+  } catch (err) {
+    fatal(`This browser could not start the visualizer.\n\n${err.message}`);
+    return;
+  }
+
+  ensureSequence(1);
+  setHud(hudOn);
+  buildDebugPanel();
+  installControls();
+  keepAwake();
+  start();
+
+  console.info(
+    `Visualizer running — ${playable.length} covers, ${opts.slotDur}s slots, ` +
+    `${opts.transDur}s transitions${opts.lockedEffect ? `, locked to "${opts.lockedEffect}"` : ''}. ` +
+    `Press Tab for the full key list.`
+  );
+}
+
+main();
