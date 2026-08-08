@@ -315,10 +315,15 @@ void main() {
 //
 // The whole artwork drifts along a flow field, live, every frame. On top of
 // that, squares of assorted sizes spawn and grow, each claiming its area for
-// one RGB channel permutation. Nothing fades and nothing pulses — a square
-// simply overwrites whatever was under it, so the frame accumulates a mosaic
-// of overlapping channel-swapped regions at many scales. About a third of the
-// permutations are the identity, which hands a patch back to its true colours.
+// one RGB channel swap. Nothing fades and nothing pulses — a square simply
+// overwrites whatever was under it, so the frame accumulates a mosaic of
+// overlapping channel-swapped regions at many scales. About a third of the
+// swaps are the identity, which hands a patch back to its true colours.
+//
+// A swap is a rearrangement plus an inversion mask: a channel can land in its
+// new slot as itself or as its own complement, so 200 red arriving in green
+// reads as either 200 or 55. That is the difference between a swap that only
+// ever recolours and one that can also flip a region into negative.
 //
 // What persists between frames is the permutation MAP, not the pixels: the
 // buffer's alpha channel holds which swap applies where, and the colour is
@@ -358,21 +363,42 @@ vec2 curlFlow(vec2 p) {
   return f / (1.0 + length(f));   // soft saturate: keeps relative speed, bounds it
 }
 
-vec3 permute(vec3 c, float w) {
-  if (w < 0.5) return c;
-  if (w < 1.5) return c.rbg;
-  if (w < 2.5) return c.grb;
-  if (w < 3.5) return c.gbr;
-  if (w < 4.5) return c.brg;
-  return c.bgr;
+// An id is a rearrangement in the high bits and a three-bit inversion mask in
+// the low three: id / 8 is which channel goes where, and the bottom three bits
+// say which of the destination channels arrive complemented.
+vec3 permute(vec3 c, float id) {
+  float w = floor(id / 8.0);
+  vec3 s = c;
+  if      (w < 1.5) s = (w < 0.5) ? c : c.rbg;
+  else if (w < 3.5) s = (w < 2.5) ? c.grb : c.gbr;
+  else              s = (w < 4.5) ? c.brg : c.bgr;
+
+  // Complement after the rearrange, so a set bit names the channel you SEE
+  // inverted rather than the one it was taken from.
+  vec3 flip = mod(floor(id / vec3(1.0, 2.0, 4.0)), 2.0);
+  return mix(s, 1.0 - s, flip);
 }
 
-const int STAMPS = 12;
+// How many squares exist at once. With the respawn period below, this is also
+// what sets how fast the mosaic accumulates — every slot that ends starts a new
+// square somewhere, and nothing ever un-claims an area except a later square
+// landing on it. Fewer slots on longer periods means the artwork underneath
+// stays readable for longer before the blocks have covered it.
+const int STAMPS = 9;
 
-// The permutation id rides in the buffer's alpha channel. Six values spread
-// across eight slots, so 8-bit rounding can never tip one into its neighbour.
-float encodeId(float w) { return (w + 0.5) / 8.0; }
-float decodeId(float a) { return floor(a * 8.0); }
+// How often each destination channel arrives as its complement. Independent
+// per channel, so this is also what makes a full negative — all three flipped
+// at once — the rare corner: at 0.35 roughly one swap in twenty-three, against
+// better than one in four that flips nothing. Worth keeping low. A negative
+// block is bright wherever the artwork is dark, and on a mostly-black cover a
+// big one is a white flash in the audience's eyes rather than an effect.
+const float FLIP_CHANCE = 0.35;
+
+// The id rides in the buffer's alpha channel: six rearrangements times eight
+// masks is 48 values, spread across 64 slots so 8-bit rounding can never tip
+// one into its neighbour.
+float encodeId(float w) { return (w + 0.5) / 64.0; }
+float decodeId(float a) { return floor(a * 64.0); }
 
 void main() {
   float E = env();
@@ -399,7 +425,7 @@ void main() {
     float fi = float(i);
 
     // Each slot respawns on its own period, so they never march in step.
-    float period = mix(1.5, 0.5, hash11(fi * 3.7 + u_seed));
+    float period = mix(2.6, 1.0, hash11(fi * 3.7 + u_seed));
     float phase = u_time / period + fi * 0.37;
     vec2 key = vec2(floor(phase), fi * 17.0 + u_seed * 91.0);
     float life = fract(phase);
@@ -408,13 +434,25 @@ void main() {
 
     // Sizes biased small so big squares stay occasional events.
     float full = mix(0.05, 0.62, pow(hash21(key + 3.1), 2.2)) * E;
-    float size = full * (0.18 + 0.82 * smoothstep(0.0, 0.55, life));
+    // Growth is a fraction of the slot's own period, so a square spends most of
+    // its life opening rather than sitting at full size. That reads as an edge
+    // creeping outward — the thing you actually watch — instead of a block that
+    // is simply there by the time you look at it.
+    float size = full * (0.18 + 0.82 * smoothstep(0.0, 0.72, life));
 
     vec2 d = abs(p - c);
     float inside = step(max(d.x, d.y), size * 0.5);
 
     float pick = hash21(key + 7.7);
-    float which = (pick < 0.34) ? 0.0 : min(5.0, floor(1.0 + (pick - 0.34) / 0.66 * 5.0));
+    float perm = (pick < 0.34) ? 0.0 : min(5.0, floor(1.0 + (pick - 0.34) / 0.66 * 5.0));
+
+    // Each destination channel decides on its own whether to arrive inverted.
+    // The identity is exempt: it is the effect's rest state, the thing that
+    // hands a patch back to the real artwork, and a patch that comes back
+    // negative has not been handed back.
+    vec3 roll = vec3(hash22(key + 5.3), hash21(key + 11.9));
+    vec3 flip = step(roll, vec3(FLIP_CHANCE)) * step(0.5, perm);
+    float which = perm * 8.0 + dot(flip, vec3(1.0, 2.0, 4.0));
 
     id = mix(id, which, inside);
   }
