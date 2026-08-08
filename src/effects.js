@@ -463,11 +463,11 @@ void main() {
 // in the middle of the screen, which is what made this read as mild, and the
 // blurred bars are only there to fill space a full-bleed image does not leave.
 const DROSTE = `
-// Eight levels rather than four or five. The recursion has to be truncated
-// somewhere, and the innermost level is the one place the loop does not close
-// perfectly — so push that discrepancy down to a couple of pixels at the dead
-// centre, where nobody can see it.
-const int LEVELS = 8;
+// The recursion has to be truncated somewhere. Rather than burying the seam
+// under levels too small to see — at this ratio the ninth is already eighteen
+// pixels wide and the eleventh is five — the innermost copy fades in as it
+// grows, so the loop closes exactly and nine levels is plenty.
+const int LEVELS = 9;
 const float RATIO = 0.52;      // each nested copy, relative to its parent
 // Standing magnification. Sized so the outermost copy covers the whole 16:9
 // frame even at the widest point of the loop and even at full spin and drift —
@@ -528,16 +528,40 @@ void main() {
 
     vec2 q = rot(TWIST * k) * p / s;
     float edge = max(abs(q.x), abs(q.y));
-    float inside = 1.0 - smoothstep(0.487, 0.5, edge);
 
     // Depth arrives a level at a time as the effect comes up, so it grows into
     // the recursion instead of snapping to full depth the moment the envelope
     // opens. Keyed on k, not i, so it stays seamless during the ramp.
-    inside *= smoothstep(0.0, 0.35, E - max(0.0, k) * 0.055);
+    // Fade the innermost copy in as it grows. This is what actually closes the
+    // loop rather than hiding its failure to close: at the wrap the deepest
+    // level sits at zero opacity, which is an exact match for the nothing that
+    // was there the frame before. Keyed on k, so it is seamless by
+    // construction instead of by being too small to notice.
+    float deepFade = 1.0 - smoothstep(float(LEVELS) - 2.0, float(LEVELS) - 1.0, k);
 
-    vec3 c = hueShift(sampleRGB(q + 0.5), HUE_STEP * k);
-    c *= clamp(1.0 - 0.06 * k, 0.6, 1.0);   // each copy a touch deeper in shadow
-    dro = mix(dro, c, inside);
+    float inside = (1.0 - smoothstep(0.487, 0.5, edge))
+                 * smoothstep(0.0, 0.35, E - max(0.0, k) * 0.055)
+                 * deepFade;
+
+    // Skip the fetches entirely for any pixel this copy does not cover. A
+    // fragment shader runs the whole loop for every pixel, so without this the
+    // innermost copies — a few dozen pixels each — are charged for the entire
+    // screen, and each extra level of depth costs as much as the first.
+    // Neighbouring fragments are almost always on the same side of a copy's
+    // edge, so the branch is coherent and effectively free.
+    if (inside > 0.0) {
+      // Deep copies are minified brutally: the whole cover squeezed into a few
+      // dozen pixels and resampled with no mip chain, which fizzes as it moves.
+      // Below a threshold, read the small pre-blurred copy instead. It is
+      // already about the right size, so the only visible difference at that
+      // scale is that it stops sparkling.
+      vec3 c = mix(sampleRGB(q + 0.5),
+                   texture2D(u_bg, clamp(q + 0.5, 0.0, 1.0)).rgb,
+                   1.0 - smoothstep(0.02, 0.07, s));
+      c = hueShift(c, HUE_STEP * k);
+      c *= clamp(1.0 - 0.06 * k, 0.6, 1.0);   // each copy a touch deeper in shadow
+      dro = mix(dro, c, inside);
+    }
     s *= RATIO;
   }
 
