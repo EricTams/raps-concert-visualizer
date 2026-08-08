@@ -5,6 +5,7 @@
 import { SETLIST, SLOT_SECONDS, TRANSITION_SECONDS, FRAMING, INTENSITY, DATAMOSH_FLOW } from '../config.js';
 import { EFFECTS, EFFECT_NAMES, FEEDBACK_EFFECTS } from './effects.js';
 import { TRANSITIONS, transitionFor } from './transitions.js';
+import { juliaTarget } from './julia.js';
 import { createContext, createScreenQuad, createTexture, draw, bindScreen, Program, Framebuffer, COPY_FRAGMENT } from './gl.js';
 
 // --- URL overrides ---------------------------------------------------------
@@ -268,6 +269,31 @@ function commitAdvance() {
 
 // --- Rendering -------------------------------------------------------------
 
+// The Julia target is a continuous function of c, except where the inverse
+// iteration crosses a square-root branch cut and the point flips. Easing
+// toward it turns any such flip into a quick pan instead of a teleport.
+// Only channel 0 needs this: during a transition the incoming cover has a
+// negative song time, so its envelope is zero and the effect renders as the
+// plain artwork whatever the target says.
+let juliaEase = null;
+let frameDt = 0.016;
+
+function juliaFor(atPos, smooth) {
+  const target = juliaTarget(clockTime, seedAt(atPos));
+  if (!smooth) return target;
+  if (!juliaEase || juliaEase.pos !== atPos) {
+    juliaEase = { pos: atPos, x: target.x, y: target.y };
+  } else {
+    const k = 1 - Math.exp(-frameDt / 0.35);
+    juliaEase.x += (target.x - juliaEase.x) * k;
+    juliaEase.y += (target.y - juliaEase.y) * k;
+  }
+  target.x = juliaEase.x;
+  target.y = juliaEase.y;
+  return target;
+}
+
+
 function renderEffect(atPos, songT, target, channel) {
   const cover = coverAt(atPos);
   const name = effectAt(atPos);
@@ -291,6 +317,8 @@ function renderEffect(atPos, songT, target, channel) {
     bindScreen(gl, width, height);
   }
 
+  const jt = juliaFor(atPos, channel === 0);
+
   prog.use()
     .tex('u_tex', cover.texture, 0)
     .tex('u_bg', cover.bgTexture, 1)
@@ -303,6 +331,8 @@ function renderEffect(atPos, songT, target, channel) {
     .f('u_seed', seedAt(atPos))
     .f('u_reset', reset)
     .v2('u_flow', opts.flowAmount, opts.flowSpeed)
+    .v4('u_julia', jt.cx, jt.cy, jt.x, jt.y)
+    .v2('u_juliaView', jt.view, jt.zb)
     // Accumulated content is stored in screen space, so the slow framing
     // breathe is held still for feedback effects — otherwise older stamps
     // would drift out of register with the artwork underneath them.
@@ -356,6 +386,7 @@ function tick(now) {
   lastFrame = now;
 
   const dt = Math.min(dtMs, 100) / 1000;
+  frameDt = dt;
   clockTime += dt;
   // Holding freezes the schedule but not the animation, so a held image keeps
   // moving instead of looking like a crashed machine. A hold pressed mid-

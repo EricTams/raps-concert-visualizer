@@ -41,6 +41,11 @@ uniform float u_reset;
 // Datamosh flow field: (amount, speed). See DATAMOSH_FLOW in config.js.
 uniform vec2 u_flow;
 
+// Julia effect: (c.x, c.y, centre.x, centre.y) and (view width, zoom phase).
+// Both are solved on the CPU — see src/julia.js.
+uniform vec4 u_julia;
+uniform vec2 u_juliaView;
+
 const float TAU = 6.28318530718;
 
 float hash11(float p) {
@@ -150,7 +155,10 @@ float env() {
 // entirely readable underneath. Points that never escape are left completely
 // alone, so the interior bulbs read as windows onto the clean art.
 const JULIA = `
-const int ITER = 72;
+// Deep in the zoom, points near the boundary take many iterations to escape.
+// Too low a cap and they are mistaken for interior and left untouched, which
+// eats exactly the filigree the zoom exists to show.
+const int ITER = 96;
 
 // Every treatment keeps the picture visible. Band 0 is untouched, so a sixth of
 // the bands are always clean however dense the filigree gets.
@@ -176,27 +184,12 @@ void main() {
   vec2 uv = coverUV(v_uv);
   vec3 src = sampleRGB(uv);
 
-  // The constant walks the classic |c| = 0.7885 circle, which passes through a
-  // whole family of Julia topologies — fat connected blobs through to dendrites
-  // — so the set morphs continuously across the slot with no keyframes.
-  float th = u_time * 0.045 + u_seed * TAU;
-  vec2 c = 0.7885 * vec2(cos(th), sin(th));
-
-  // Breathe the view in and out, geometrically rather than linearly so the
-  // apparent zoom rate stays constant. The range is deliberately shallow: push
-  // much further in and the whole panel lands inside one basin or one escape
-  // band, and a flat frame is the one thing this effect must not produce.
-  // Wide, the set sits small inside rings of escape bands; tight, its boundary
-  // filigree fills the frame.
-  float zb = 0.5 - 0.5 * cos(u_time * 0.26 + u_seed * TAU);
-  float scale = 2.0 * pow(3.25, zb);
-
-  // Drift the centre off the origin, which for a connected Julia set sits deep
-  // in the interior and would zoom into featureless untouched artwork.
-  float psi = u_time * 0.031 + u_seed * 3.1;
-  vec2 centre = 0.22 * vec2(cos(psi), sin(psi * 1.3));
-
-  vec2 z = (uv - 0.5) * scale + centre;
+  // The constant and the point to zoom at are both solved on the CPU: the
+  // target is a genuine point of the Julia set, found by inverse iteration, so
+  // the view is always aimed at boundary structure rather than at whatever
+  // happens to be at some fixed coordinate. See src/julia.js.
+  vec2 c = u_julia.xy;
+  vec2 z = (uv - 0.5) * u_juliaView.x + u_julia.zw;
 
   float mu = 0.0;
   float escaped = 0.0;
@@ -212,7 +205,13 @@ void main() {
     }
   }
 
-  vec3 col = mix(src, treat(src, floor(mu / 1.15)), escaped);
+  // Escape times are low and change slowly at the wide end of the zoom, which
+  // on its own gives a few enormous flat bands and a very mild frame. Narrow
+  // the bands as the view widens so the density of structure on screen stays
+  // roughly constant across the whole zoom cycle.
+  float bandWidth = mix(0.55, 1.6, u_juliaView.y);
+
+  vec3 col = mix(src, treat(src, floor(mu / bandWidth)), escaped);
   gl_FragColor = vec4(mix(src, col, E), 1.0);
 }
 `;
