@@ -182,7 +182,21 @@ void main() {
   float th = u_time * 0.045 + u_seed * TAU;
   vec2 c = 0.7885 * vec2(cos(th), sin(th));
 
-  vec2 z = (uv - 0.5) * 3.0;
+  // Breathe the view in and out, geometrically rather than linearly so the
+  // apparent zoom rate stays constant. The range is deliberately shallow: push
+  // much further in and the whole panel lands inside one basin or one escape
+  // band, and a flat frame is the one thing this effect must not produce.
+  // Wide, the set sits small inside rings of escape bands; tight, its boundary
+  // filigree fills the frame.
+  float zb = 0.5 - 0.5 * cos(u_time * 0.26 + u_seed * TAU);
+  float scale = 2.0 * pow(3.25, zb);
+
+  // Drift the centre off the origin, which for a connected Julia set sits deep
+  // in the interior and would zoom into featureless untouched artwork.
+  float psi = u_time * 0.031 + u_seed * 3.1;
+  vec2 centre = 0.22 * vec2(cos(psi), sin(psi * 1.3));
+
+  vec2 z = (uv - 0.5) * scale + centre;
 
   float mu = 0.0;
   float escaped = 0.0;
