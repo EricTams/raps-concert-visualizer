@@ -140,11 +140,32 @@ const seedAt = (pos) => hashInt(pos * 2654435761);
 // Set from the Tab panel or ?fx=; overrides whatever the setlist assigns.
 let effectOverride = opts.lockedEffect;
 
+// Shaders chosen by a manual skip, keyed by position. Remembered rather than
+// re-rolled, so the choice does not change under you every frame.
+const skipFx = new Map();
+
 function effectAt(pos) {
   if (effectOverride) return effectOverride;
+  const skipped = skipFx.get(pos);
+  if (skipped) return skipped;
   const fx = coverAt(pos).fx;
   if (fx && EFFECTS[fx]) return fx;
   return EFFECT_NAMES[Math.floor(seedAt(pos) * EFFECT_NAMES.length) % EFFECT_NAMES.length];
+}
+
+/**
+ * Asking for the next cover is asking for something else to look at, so it
+ * changes the shader as well — and it wins over a pinned one, because pinning
+ * is for holding a shader while the show runs itself, not for refusing to move.
+ * Press the shader key again after skipping to pin the new one.
+ */
+function freshEffect(targetPos) {
+  const leaving = effectAt(pos);
+  effectOverride = null;
+  const choices = EFFECT_NAMES.filter((name) => name !== leaving);
+  skipFx.set(targetPos, choices[Math.floor(Math.random() * choices.length)]);
+  // Slots already behind us are never looked at again.
+  for (const at of skipFx.keys()) if (at < pos - 1) skipFx.delete(at);
 }
 
 // --- GL resources ----------------------------------------------------------
@@ -261,9 +282,12 @@ const songTime = () => showTime - slotStart;
 const transitionStart = () => opts.slotDur - opts.transDur;
 const isTransitioning = () => pendingPos !== null && songTime() >= transitionStart();
 
+// Only ever called by the operator — the automatic advance sets pendingPos
+// itself — so this is the one place that knows a skip was asked for.
 function goTo(targetPos) {
   if (targetPos < 0) return;
   ensureSequence(targetPos);
+  freshEffect(targetPos);
   pendingPos = targetPos;
   slotStart = showTime - transitionStart();
 }
@@ -590,7 +614,9 @@ function installControls() {
       case 'p': held = !held; break;
       case 'f': toggleFullscreen(); break;
       case 'h': setHud(!hudOn); break;
-      case '0': effectOverride = null; updateDebugPanel(); break;
+      // Back to the setlist: drops a pinned shader and every shader a skip
+      // picked, so what is on screen is what the show would have chosen.
+      case '0': effectOverride = null; skipFx.clear(); updateDebugPanel(); break;
       case '[': opts.intensity = Math.max(0, opts.intensity - 0.1); updateDebugPanel(); break;
       case ']': opts.intensity = Math.min(2, opts.intensity + 0.1); updateDebugPanel(); break;
       default: {
