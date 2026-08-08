@@ -447,31 +447,104 @@ void main() {
 `;
 
 // --- 6. Droste tunnel -----------------------------------------------------
+//
+// The cover contains a smaller copy of itself, which contains a smaller copy,
+// without end — and the view magnifies continuously through it.
+//
+// Over one loop the view grows by exactly the nesting ratio, at which point
+// every copy has grown into the place of the one outside it and the frame is
+// identical to where it started. So the zoom runs forever with no cut, no
+// reset and no seam.
+//
+// This is the one effect that abandons the framing the rest of the show keeps.
+// There is no contained square and no blurred surround: the outermost copy is
+// magnified until it covers the whole frame, and the recursion runs edge to
+// edge. Fitting the cover inside a panel leaves the nesting as a small detail
+// in the middle of the screen, which is what made this read as mild, and the
+// blurred bars are only there to fill space a full-bleed image does not leave.
 const DROSTE = `
-// The cover contains successively smaller, slowly rotating copies of itself.
+// Eight levels rather than four or five. The recursion has to be truncated
+// somewhere, and the innermost level is the one place the loop does not close
+// perfectly — so push that discrepancy down to a couple of pixels at the dead
+// centre, where nobody can see it.
+const int LEVELS = 8;
+const float RATIO = 0.52;      // each nested copy, relative to its parent
+// Standing magnification. Sized so the outermost copy covers the whole 16:9
+// frame even at the widest point of the loop and even at full spin and drift —
+// otherwise the corners fall outside the artwork and the dimmed surround
+// creeps back in as dark wedges, which is exactly what this mode is avoiding.
+const float BASE_ZOOM = 2.20;
+const float LOOP = 15.0;       // seconds to magnify by exactly 1 / RATIO
+const float TWIST = 0.22;      // radians of rotation per level
+const float HUE_STEP = 0.30;   // hue turn per level
+
+// Independent breathing periods, in seconds, deliberately sharing no common
+// factor — so the motions drift in and out of phase with one another and the
+// composition never settles into a recognisable repeat.
+//
+// These are all GLOBAL: they move the whole nested stack together. Anything
+// that varied per level would have to stay locked to k to keep the recursion
+// seamless, but a motion applied to every level at once is free to breathe
+// however it likes, because it cannot disturb the level-index handover.
+const float BREATH_ZOOM  = 23.0;
+const float BREATH_SPIN  = 37.0;
+const float BREATH_DRIFTX = 29.0;
+const float BREATH_DRIFTY = 43.0;
+
 void main() {
   float E = env();
   vec2 uv = coverUV(v_uv);
-  vec2 p = uv - 0.5;
-  float t = u_time * 0.08 + u_seed * 11.0;
-  float m = panelMask(uv) * E;
+  vec3 src = sampleRGB(uv);
+  float sd = u_seed * TAU;
 
-  vec3 col = sampleRGB(uv);
-  for (int i = 1; i < 4; i++) {
-    float fi = float(i);
-    float sc = pow(0.56, fi) * (1.0 + 0.10 * sin(t * 2.0 + fi));
-    vec2 q = rot(t * 0.30 * fi * m) * p / mix(1.0, sc, m);
+  // Zoom phase. The warp term is periodic over the loop and vanishes at both
+  // ends, so the push-in surges and eases within each pass while still
+  // advancing exactly one level per loop — which is what keeps it seamless.
+  // Its depth is itself modulated, so no two passes surge the same way.
+  float f = fract(u_time / LOOP + u_seed);
+  float zt = f + 0.13 * sin(f * TAU)
+                * (0.6 + 0.4 * sin(u_time / BREATH_ZOOM * TAU + sd));
 
+  // Spin and drift of the whole tunnel, each on its own clock.
+  // Kept modest: every extra degree of spin and unit of drift pushes the frame
+  // corners further out, and BASE_ZOOM has to grow to match, which costs
+  // resolution in the artwork for motion nobody asked for.
+  float spin = 0.18 * sin(u_time / BREATH_SPIN * TAU + sd);
+  vec2 drift = 0.040 * vec2(sin(u_time / BREATH_DRIFTX * TAU + sd),
+                            cos(u_time / BREATH_DRIFTY * TAU + sd * 1.7));
+
+  vec2 p = rot(spin) * (uv - 0.5) + drift;
+
+  // One pow, then step down by RATIO per level, rather than a pow per level.
+  float s = pow(1.0 / RATIO, zt) * BASE_ZOOM;
+
+  vec3 dro = src;
+  for (int i = 0; i < LEVELS; i++) {
+    // The level index shifts by one over a loop, so everything that varies per
+    // level is driven by (i - zt) rather than by i. That is what closes the
+    // loop: at zt = 1 each level holds exactly the scale, angle and hue its
+    // outer neighbour held at zt = 0.
+    float k = float(i) - zt;
+
+    vec2 q = rot(TWIST * k) * p / s;
     float edge = max(abs(q.x), abs(q.y));
-    float inside = 1.0 - smoothstep(0.492, 0.5, edge);
+    float inside = 1.0 - smoothstep(0.487, 0.5, edge);
 
-    vec3 c = hueShift(sampleRGB(q + 0.5), fi * 0.35 * m);
-    col = mix(col, c, inside * m * 0.88);
+    // Depth arrives a level at a time as the effect comes up, so it grows into
+    // the recursion instead of snapping to full depth the moment the envelope
+    // opens. Keyed on k, not i, so it stays seamless during the ramp.
+    inside *= smoothstep(0.0, 0.35, E - max(0.0, k) * 0.055);
+
+    vec3 c = hueShift(sampleRGB(q + 0.5), HUE_STEP * k);
+    c *= clamp(1.0 - 0.06 * k, 0.6, 1.0);   // each copy a touch deeper in shadow
+    dro = mix(dro, c, inside);
+    s *= RATIO;
   }
 
-  col *= 1.0 - 0.25 * E * smoothstep(0.30, 0.90, length(toCentred(v_uv)));
+  dro *= 1.0 - 0.22 * smoothstep(0.35, 0.95, length(toCentred(v_uv)));
 
-  gl_FragColor = vec4(col, 1.0);
+  // No panel mask: this one runs to the edges of the screen.
+  gl_FragColor = vec4(mix(src, dro, E), 1.0);
 }
 `;
 

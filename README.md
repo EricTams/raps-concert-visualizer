@@ -79,7 +79,10 @@ and add a line to `SETLIST` in `config.js`.
 
 The square artwork is contained inside the wide frame so nothing is ever cropped;
 the space either side is filled with a heavily blurred, dimmed copy of the same
-image. Each frame is one draw straight to the screen, or three during a transition
+image. `droste` is the deliberate exception — it magnifies past the edge of the
+cover and runs edge to edge, because containing the artwork leaves its recursion
+as a small detail in the middle of the screen, and blurred bars only exist to
+fill space a full-bleed image does not leave. Each frame is one draw straight to the screen, or three during a transition
 (outgoing effect, incoming effect, composite). If the machine can't hold frame
 rate, the render resolution steps down automatically rather than stuttering.
 
