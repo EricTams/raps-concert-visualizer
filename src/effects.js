@@ -248,6 +248,43 @@ void main() {
 // scales. About a third of the permutations are the identity, which repairs a
 // patch back to the original and keeps the cover from silting up entirely.
 const DATAMOSH = `
+// Flow: how far the artwork drifts, as a fraction of its width, and how fast
+// the field itself evolves. These two numbers are the whole feel of it.
+const float FLOW_AMOUNT = 0.045;
+const float FLOW_SPEED  = 0.030;
+
+// Only three octaves, sampled over a wide epsilon. The potential has to be
+// SMOOTH: take the gradient of the full five-octave fbm over a small epsilon
+// and the finest octaves dominate it, which marbles the artwork into
+// turbulent filigree rather than drifting it.
+float flowNoise(vec2 p) {
+  float v = 0.0, a = 0.5;
+  for (int k = 0; k < 3; k++) {
+    v += a * noise2(p);
+    p = p * 2.0 + vec2(5.7, 2.3);
+    a *= 0.5;
+  }
+  return v;
+}
+
+// A divergence-free drift taken as the curl of a noise potential, so the
+// artwork shears and swirls instead of bunching up or tearing holes. Forward
+// differences, so three potential samples rather than four.
+//
+// Because stamps persist, each square freezes the flow at the moment it landed.
+// Neighbouring patches therefore disagree about where the image is, and that
+// disagreement is the point — it is what real datamoshing looks like.
+vec2 curlFlow(vec2 p) {
+  vec2 drift = vec2(u_time * FLOW_SPEED, u_time * -FLOW_SPEED * 0.7);
+  float e = 0.08;
+  float n0 = flowNoise(p + drift);
+  float nx = flowNoise(p + vec2(e, 0.0) + drift);
+  float ny = flowNoise(p + vec2(0.0, e) + drift);
+
+  vec2 f = vec2(ny - n0, -(nx - n0)) / e;
+  return f / (1.0 + length(f));   // soft saturate: keeps relative speed, bounds it
+}
+
 vec3 permute(vec3 c, float w) {
   if (w < 0.5) return c;
   if (w < 1.5) return c.rbg;
@@ -262,7 +299,14 @@ const int STAMPS = 6;
 void main() {
   float E = env();
   vec2 uv = coverUV(v_uv);
-  vec3 src = sampleRGB(uv);
+
+  // Fade the flow out toward the panel edge, so the cover stays a crisp
+  // rectangle on its surround while its contents move inside it.
+  float inset = min(min(uv.x, 1.0 - uv.x), min(uv.y, 1.0 - uv.y));
+  float atten = smoothstep(0.0, 0.10, inset);
+
+  vec2 flow = curlFlow(uv * 1.6) * FLOW_AMOUNT * atten * E;
+  vec3 src = sampleRGB(uv + flow);
 
   // Nothing accumulated yet, or the effect has not faded in: show the art.
   if (u_reset > 0.5 || E < 0.02) {
