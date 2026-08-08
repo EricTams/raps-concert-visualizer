@@ -166,7 +166,7 @@ export const TRANSITIONS = {
 
 /** Which transition leads into each effect. */
 export const TRANSITION_FOR_EFFECT = {
-  liquid:   'melt',
+  julia:    'melt',
   ripple:   'melt',
   droste:   'melt',
   vhs:      'tear',

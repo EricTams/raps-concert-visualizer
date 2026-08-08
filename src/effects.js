@@ -141,28 +141,65 @@ float env() {
 }
 `;
 
-// --- 1. Liquid warp -------------------------------------------------------
-const LIQUID = `
+// --- 1. Julia escape-time bands -------------------------------------------
+//
+// The fractal never replaces the artwork — it only decides what happens WHERE.
+// Every pixel still comes from the cover; the escape-time count selects which
+// treatment that pixel gets, so the set's filigree appears as banded regions of
+// posterising, channel rotation and inversion laid over a picture that stays
+// entirely readable underneath. Points that never escape are left completely
+// alone, so the interior bulbs read as windows onto the clean art.
+const JULIA = `
+const int ITER = 72;
+
+// Every treatment keeps the picture visible. Band 0 is untouched, so a sixth of
+// the bands are always clean however dense the filigree gets.
+//
+// All of these hold roughly the source brightness. A straight inversion looks
+// great on a bright cover and turns a mostly-black one into a sheet of white —
+// which on a projector is a flash in the audience's eyes, not an effect. Band 3
+// inverts the colour but keeps the luminance, and band 4 lifts shadows instead
+// of blowing highlights, so the filigree stays visible over dark artwork.
+vec3 treat(vec3 c, float band) {
+  float w = mod(band, 6.0);
+  float l = luma(c);
+  if (w < 1.0) return c;
+  if (w < 2.0) return floor(c * 4.0 + 0.5) / 4.0;
+  if (w < 3.0) return c.gbr;
+  if (w < 4.0) return clamp(vec3(2.0 * l) - c, 0.0, 1.0);
+  if (w < 5.0) return clamp(c + vec3(0.30, 0.10, 0.42) * (1.0 - l), 0.0, 1.0);
+  return clamp((c - 0.5) * 1.9 + 0.5, 0.0, 1.0);
+}
+
 void main() {
   float E = env();
   vec2 uv = coverUV(v_uv);
-  float t = u_time * 0.13 + u_seed * 10.0;
+  vec3 src = sampleRGB(uv);
 
-  vec2 q = vec2(fbm(uv * 3.0 + t),
-                fbm(uv * 3.0 + vec2(5.2, 1.3) - t * 0.7));
-  vec2 r = vec2(fbm(uv * 3.0 + 4.0 * q + vec2(1.7, 9.2) + t * 0.40),
-                fbm(uv * 3.0 + 4.0 * q + vec2(8.3, 2.8) - t * 0.31));
+  // The constant walks the classic |c| = 0.7885 circle, which passes through a
+  // whole family of Julia topologies — fat connected blobs through to dendrites
+  // — so the set morphs continuously across the slot with no keyframes.
+  float th = u_time * 0.045 + u_seed * TAU;
+  vec2 c = 0.7885 * vec2(cos(th), sin(th));
 
-  vec2 warp = (r - 0.5) * 0.05 * E;
-  float mag = length(warp);
-  vec2 ca = normalize(warp + 1e-5) * mag * 0.30;
+  vec2 z = (uv - 0.5) * 3.0;
 
-  vec3 col = sampleChroma(uv + warp, ca);
-  col = hueShift(col, (r.x - 0.5) * 0.55 * E + sin(u_time * 0.07) * 0.15 * E);
-  col *= 0.94 + 0.20 * fbm(uv * 6.0 - t * 0.5);
-  col = mix(col, col * col * (3.0 - 2.0 * col), 0.15 * E);
+  float mu = 0.0;
+  float escaped = 0.0;
+  for (int i = 0; i < ITER; i++) {
+    z = vec2(z.x * z.x - z.y * z.y, 2.0 * z.x * z.y) + c;
+    float r2 = dot(z, z);
+    if (r2 > 256.0) {
+      // Continuous iteration count, so band edges don't stair-step with the
+      // integer loop counter.
+      mu = float(i) + 1.0 - log2(0.5 * log(r2));
+      escaped = 1.0;
+      break;
+    }
+  }
 
-  gl_FragColor = vec4(col, 1.0);
+  vec3 col = mix(src, treat(src, floor(mu / 1.15)), escaped);
+  gl_FragColor = vec4(mix(src, col, E), 1.0);
 }
 `;
 
@@ -488,7 +525,7 @@ void main() {
 
 /** name -> full fragment shader source. Order defines the `?fx=N` indices. */
 export const EFFECTS = {
-  liquid:   PRELUDE + LIQUID,
+  julia:    PRELUDE + JULIA,
   vhs:      PRELUDE + VHS,
   kaleido:  PRELUDE + KALEIDO,
   datamosh: PRELUDE + DATAMOSH,

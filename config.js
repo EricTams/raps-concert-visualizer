@@ -17,10 +17,10 @@ export const TRANSITION_SECONDS = 3;
 // and reorder the lines below to match your setlist.
 //
 // `fx` names the shader effect this cover gets. Available effects:
-//   liquid  vhs  kaleido  datamosh  ripple  droste  halftone  slitscan
+//   julia   vhs  kaleido  datamosh  ripple  droste  halftone  slitscan
 // Set fx to null to have one picked at random each cycle.
 export const SETLIST = [
-  { file: 'images/moneh-cover.jpg',                  title: 'Moneh',                     fx: 'liquid'   },
+  { file: 'images/moneh-cover.jpg',                  title: 'Moneh',                     fx: 'julia'    },
   { file: 'images/true-view.jpg',                    title: 'True View',                 fx: 'droste'   },
   { file: 'images/show-of-hands-cover.jpg',          title: 'Show of Hands',             fx: 'vhs'      },
   { file: 'images/stop-and-smell-the-roses.jpg',     title: 'Stop and Smell the Roses',  fx: 'ripple'   },

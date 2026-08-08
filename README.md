@@ -29,7 +29,7 @@ its key, and what's currently playing. Press `Tab` again to dismiss it.
 | `→` / `Space` / click | Move to the next cover now, with a proper transition |
 | `←` | Go back one |
 | `1`–`8` | Jump to that cover |
-| `Q W E R T Y U I` | Switch the shader live — liquid, vhs, kaleido, datamosh, ripple, droste, halftone, slitscan |
+| `Q W E R T Y U I` | Switch the shader live — julia, vhs, kaleido, datamosh, ripple, droste, halftone, slitscan |
 | `0` | Release the shader override, back to what the setlist assigns |
 | `[` / `]` | Intensity down / up |
 | `P` | Hold on this cover — freezes the countdown, the effect keeps moving |
@@ -55,7 +55,7 @@ Everything you'd want to adjust is in [`config.js`](config.js): the setlist, how
 long each cover holds, which effect each one gets, how the art is framed, and the
 global intensity.
 
-Effects available: `liquid`, `vhs`, `kaleido`, `datamosh`, `ripple`, `droste`,
+Effects available: `julia`, `vhs`, `kaleido`, `datamosh`, `ripple`, `droste`,
 `halftone`, `slitscan`. Set an entry's `fx` to `null` to have one picked at random.
 
 ### Adding or replacing a cover
