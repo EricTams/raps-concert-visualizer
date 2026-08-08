@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-// CPU-side targeting for the Julia effect.
+// CPU-side targeting and camera for the Julia effect.
 //
 // The only part of a Julia set worth looking at is its boundary. The interior
 // is featureless and the far exterior is a handful of very wide escape bands,
@@ -11,8 +11,7 @@
 // them from almost any start converges onto the boundary geometrically fast.
 // Two dozen steps with a fixed sign sequence single out one specific boundary
 // point, and because the map is contracting the result depends on the last few
-// choices rather than where it started. Recomputing it every frame against the
-// current c keeps the target riding the boundary as the set morphs under it.
+// choices rather than where it started.
 //
 // All of this is a few dozen flops per frame here, versus running the same
 // iteration redundantly in every one of several million fragments.
@@ -27,37 +26,70 @@ const VIEW_WIDE = 2.4;      // complex-plane view width at the wide end
 const VIEW_TIGHT = 0.28;    // ... and at the tight end
 const INVERSE_STEPS = 24;
 
-function smoothstep(a, b, x) {
-  const t = Math.min(1, Math.max(0, (x - a) / (b - a)));
-  return t * t * (3 - 2 * t);
+/** Zoom phase, 0 at the wide end of the cycle and 1 at the tight end. */
+function zoomAt(f) {
+  return 0.5 - 0.5 * Math.cos(f * TAU);
+}
+
+/** Complex-plane view width. Geometric, so apparent zoom rate is constant. */
+function viewAt(f) {
+  return VIEW_TIGHT * Math.pow(VIEW_WIDE / VIEW_TIGHT, 1 - zoomAt(f));
 }
 
 /**
- * A point on the Julia set for c, picked out by a sign sequence derived from
- * `seedBits`. Different seeds land on different parts of the boundary.
+ * A point on the Julia set for c. On the first call the branch at each step is
+ * chosen from `seedBits`, which is what picks out one boundary point rather
+ * than another. On later calls it is chosen to stay near `prev`, the same
+ * step's value from the frame before.
+ *
+ * That continuity rule is essential, not a refinement. The principal square
+ * root swaps which of the two roots it names as w crosses the negative real
+ * axis, and as c drifts some intermediate w crosses it every few seconds. With
+ * a fixed sign sequence the point then teleports to an unrelated part of the
+ * boundary — measured at roughly 490 view-widths in a single frame, about once
+ * every nine seconds — and the view goes chasing after it for no reason.
  */
-function boundaryPoint(cx, cy, seedBits) {
+function walkToBoundary(cx, cy, seedBits, prev) {
+  const traj = new Float64Array(2 * INVERSE_STEPS);
   let zx = 0, zy = 0;
   let bits = seedBits >>> 0;
+
   for (let i = 0; i < INVERSE_STEPS; i++) {
     const wx = zx - cx, wy = zy - cy;
     const r = Math.hypot(wx, wy);
-    // Principal square root of w.
+    // Principal square root of w; the other root is its negation.
     let sx = Math.sqrt(Math.max(0, (r + wx) * 0.5));
     let sy = Math.sqrt(Math.max(0, (r - wx) * 0.5));
     if (wy < 0) sy = -sy;
-    // Then take one branch or the other.
+
     bits = (Math.imul(bits, 1103515245) + 12345) >>> 0;
-    if (bits & 0x10000) { sx = -sx; sy = -sy; }
+    let flip = (bits & 0x10000) !== 0;
+
+    if (prev) {
+      const px = prev[2 * i], py = prev[2 * i + 1];
+      const ax = sx - px, ay = sy - py;
+      const bx = -sx - px, by = -sy - py;
+      flip = (bx * bx + by * by) < (ax * ax + ay * ay);
+    }
+
+    if (flip) { sx = -sx; sy = -sy; }
+    traj[2 * i] = sx;
+    traj[2 * i + 1] = sy;
     zx = sx;
     zy = sy;
   }
-  return [zx, zy];
+
+  return { x: zx, y: zy, traj };
 }
 
+// Trajectory carried between frames so the target evolves continuously. Reset
+// when the cycle index advances, which is the deliberate re-aim.
+let walkState = null;
+
 /**
- * The constant, the point to zoom at, and how wide a view to take, for a given
- * moment of a given slot.
+ * Where to aim, how wide a view to take, and the constant, for a given moment
+ * of a given slot. This is the target only — the camera below decides how the
+ * view actually gets there.
  */
 export function juliaTarget(time, seed) {
   const th = time * C_RATE + seed * TAU;
@@ -68,27 +100,100 @@ export function juliaTarget(time, seed) {
   const n = Math.floor(cyc);
   const f = cyc - n;
 
-  // Geometric, so the apparent zoom rate stays constant through the cycle.
-  const zb = 0.5 - 0.5 * Math.cos(f * TAU);
-  const view = VIEW_TIGHT * Math.pow(VIEW_WIDE / VIEW_TIGHT, 1 - zb);
+  // A new cycle index means a deliberate re-aim, so the trajectory starts
+  // fresh from the seed rather than tracking the old point. The index turns
+  // over at f = 0, the widest point of the zoom, so the flight across happens
+  // while pulled back and the push-in lands on the new point.
+  if (!walkState || walkState.seed !== seed || walkState.n !== n) {
+    walkState = { seed, n, traj: null };
+  }
+  const p = walkToBoundary(cx, cy, Math.imul(n, 2654435761), walkState.traj);
+  walkState.traj = p.traj;
 
-  // Glide to the next point across the whole back half of the cycle, which is
-  // exactly the stretch spent pulling out. The result reads as one continuous
-  // move — settle on a point, pull back while travelling to the next, push in
-  // on that one — rather than a jump. Squeeze this into a short window and it
-  // becomes a lurch across the plane, however slow the zoom around it is.
-  //
-  // Continuous across the cycle boundary, because the blend finishes exactly on
-  // the next cycle's point just as the index increments to it.
-  const a = boundaryPoint(cx, cy, Math.imul(n, 2654435761));
-  const b = boundaryPoint(cx, cy, Math.imul(n + 1, 2654435761));
-  const t = smoothstep(0.55, 1.0, f);
+  return { cx, cy, x: p.x, y: p.y, view: viewAt(f), zb: zoomAt(f) };
+}
 
-  return {
-    cx, cy,
-    x: a[0] + (b[0] - a[0]) * t,
-    y: a[1] + (b[1] - a[1]) * t,
-    view,
-    zb,
-  };
+// ---------------------------------------------------------------------------
+// The camera.
+//
+// Rather than interpolating along a path — which pins the motion to a schedule
+// and lurches whenever the target changes off-schedule — the view carries a
+// velocity and is steered by a bounded acceleration. It cannot jump, because
+// position only ever changes by velocity x dt and velocity only ever changes by
+// at most MAX_ACCEL x dt. However abruptly the target moves, the view winds up,
+// travels, and eases off on approach.
+//
+// Both limits are expressed in view-widths, so a move looks the same whether it
+// happens at the wide end of the zoom or deep in the filigree. In world terms
+// the camera is roughly eight times slower when zoomed in, which is exactly
+// right — the same world distance is a far bigger gesture on screen.
+// ---------------------------------------------------------------------------
+
+const MAX_SPEED = 0.16;      // view-widths per second
+const MAX_ACCEL = 0.10;      // view-widths per second squared
+const ARRIVE_RADIUS = 0.9;   // start easing off inside this many view-widths
+const MAX_STEP = 0.05;       // clamp dt, so a stalled frame cannot launch it
+
+export class JuliaCamera {
+  constructor() {
+    this.x = 0;
+    this.y = 0;
+    this.vx = 0;
+    this.vy = 0;
+    this.ready = false;
+  }
+
+  /** Snap to a target. Used at a slot change, where there is nothing to fly from. */
+  reset(target) {
+    this.x = target.x;
+    this.y = target.y;
+    this.vx = 0;
+    this.vy = 0;
+    this.ready = true;
+  }
+
+  step(target, view, dt) {
+    if (!this.ready) return this.reset(target);
+    const h = Math.min(dt, MAX_STEP);
+
+    const maxSpeed = MAX_SPEED * view;
+    const maxAccel = MAX_ACCEL * view;
+    const arrive = ARRIVE_RADIUS * view;
+
+    const dx = target.x - this.x;
+    const dy = target.y - this.y;
+    const dist = Math.hypot(dx, dy);
+
+    // Wanted velocity: full tilt when far off, tapering to nothing on arrival.
+    // That taper is the deceleration — without it the camera runs at speed
+    // until it is on top of the target and then stops dead.
+    let wx = 0, wy = 0;
+    if (dist > 1e-9) {
+      const want = maxSpeed * Math.min(1, dist / arrive);
+      wx = (dx / dist) * want;
+      wy = (dy / dist) * want;
+    }
+
+    // Steer toward that velocity, but never faster than the acceleration limit.
+    let ax = wx - this.vx;
+    let ay = wy - this.vy;
+    const need = Math.hypot(ax, ay);
+    const budget = maxAccel * h;
+    if (need > budget) {
+      ax = (ax / need) * budget;
+      ay = (ay / need) * budget;
+    }
+    this.vx += ax;
+    this.vy += ay;
+
+    const speed = Math.hypot(this.vx, this.vy);
+    if (speed > maxSpeed) {
+      this.vx = (this.vx / speed) * maxSpeed;
+      this.vy = (this.vy / speed) * maxSpeed;
+    }
+
+    this.x += this.vx * h;
+    this.y += this.vy * h;
+    return this;
+  }
 }

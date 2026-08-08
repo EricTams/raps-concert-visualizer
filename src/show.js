@@ -5,7 +5,7 @@
 import { SETLIST, SLOT_SECONDS, TRANSITION_SECONDS, FRAMING, INTENSITY, DATAMOSH_FLOW } from '../config.js';
 import { EFFECTS, EFFECT_NAMES, FEEDBACK_EFFECTS } from './effects.js';
 import { TRANSITIONS, transitionFor } from './transitions.js';
-import { juliaTarget } from './julia.js';
+import { juliaTarget, JuliaCamera } from './julia.js';
 import { createContext, createScreenQuad, createTexture, draw, bindScreen, Program, Framebuffer, COPY_FRAGMENT } from './gl.js';
 
 // --- URL overrides ---------------------------------------------------------
@@ -269,30 +269,30 @@ function commitAdvance() {
 
 // --- Rendering -------------------------------------------------------------
 
-// The Julia target is a continuous function of c, except where the inverse
-// iteration crosses a square-root branch cut and the point flips. Easing
-// toward it turns any such flip into a quick pan instead of a teleport.
-// Only channel 0 needs this: during a transition the incoming cover has a
+// The Julia view carries a velocity and is steered by a bounded acceleration,
+// so it can never jump however abruptly the target moves — see JuliaCamera.
+// Only channel 0 is steered: during a transition the incoming cover has a
 // negative song time, so its envelope is zero and the effect renders as the
-// plain artwork whatever the target says.
-let juliaEase = null;
+// plain artwork whatever the camera says.
+const juliaCam = new JuliaCamera();
+let juliaCamPos = null;
 let frameDt = 0.016;
 
-function juliaFor(atPos, smooth) {
+const IDLE_JULIA = { cx: 0, cy: 0, x: 0, y: 0, view: 1, zb: 0 };
+
+function juliaFor(atPos, channel) {
+  if (channel !== 0) return IDLE_JULIA;
   const target = juliaTarget(clockTime, seedAt(atPos));
-  if (!smooth) return target;
-  if (!juliaEase || juliaEase.pos !== atPos) {
-    juliaEase = { pos: atPos, x: target.x, y: target.y };
+  if (juliaCamPos !== atPos) {
+    juliaCam.reset(target);
+    juliaCamPos = atPos;
   } else {
-    const k = 1 - Math.exp(-frameDt / 0.35);
-    juliaEase.x += (target.x - juliaEase.x) * k;
-    juliaEase.y += (target.y - juliaEase.y) * k;
+    juliaCam.step(target, target.view, frameDt);
   }
-  target.x = juliaEase.x;
-  target.y = juliaEase.y;
+  target.x = juliaCam.x;
+  target.y = juliaCam.y;
   return target;
 }
-
 
 function renderEffect(atPos, songT, target, channel) {
   const cover = coverAt(atPos);
@@ -317,7 +317,7 @@ function renderEffect(atPos, songT, target, channel) {
     bindScreen(gl, width, height);
   }
 
-  const jt = juliaFor(atPos, channel === 0);
+  const jt = juliaFor(atPos, channel);
 
   prog.use()
     .tex('u_tex', cover.texture, 0)
