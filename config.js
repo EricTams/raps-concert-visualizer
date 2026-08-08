@@ -54,7 +54,7 @@ export const FRAMING = {
 export const DATAMOSH_FLOW = {
   // How far the artwork drifts, as a fraction of its width. This is the dial
   // that matters — 0.04 is a slow sway, 0.12 a visible slosh, 0.3 a churn.
-  amount: 0.084,
+  amount: 0.042,
   // How fast the field itself rearranges. Too high and it shimmers rather
   // than flows, because the direction reverses before the eye tracks it.
   speed: 0.055,
