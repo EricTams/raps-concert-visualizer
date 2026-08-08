@@ -29,7 +29,7 @@ its key, and what's currently playing. Press `Tab` again to dismiss it.
 | `→` / `Space` / click | Move to the next cover now, with a proper transition |
 | `←` | Go back one |
 | `1`–`8` | Jump to that cover |
-| `Q W E R T Y U I` | Switch the shader live — julia, vhs, kaleido, datamosh, ripple, droste, halftone, slitscan |
+| `Q W E R T Y U I O` | Switch the shader live — julia, vhs, kaleido, datamosh, ripple, droste, halftone, slitscan, chamber |
 | `0` | Release the shader override, back to what the setlist assigns |
 | `[` / `]` | Intensity down / up |
 | `P` | Hold on this cover — freezes the countdown, the effect keeps moving |
@@ -48,6 +48,7 @@ Append to the address, e.g. `?dur=90&intensity=0.7`.
 | `order=fixed` | Play the setlist in `config.js` order instead of shuffling |
 | `fx=vhs` | Lock every cover to one effect — useful for previewing |
 | `hud=1` | Start with the info overlay visible |
+| `capture=1` | Keep the GL drawing buffer, so screenshots and screen recorders capture the canvas instead of black. Development only — it can cost a copy per frame |
 
 ## Changing things
 
@@ -56,7 +57,8 @@ long each cover holds, which effect each one gets, how the art is framed, and th
 global intensity.
 
 Effects available: `julia`, `vhs`, `kaleido`, `datamosh`, `ripple`, `droste`,
-`halftone`, `slitscan`. Set an entry's `fx` to `null` to have one picked at random.
+`halftone`, `slitscan`, `chamber`. Set an entry's `fx` to `null` to have one
+picked at random.
 
 ### Adding or replacing a cover
 
@@ -71,10 +73,12 @@ and add a line to `SETLIST` in `config.js`.
 ## How it works
 
 - `src/gl.js` — WebGL context, program compilation, framebuffers.
-- `src/effects.js` — the eight effect shaders, sharing one prelude that handles
+- `src/effects.js` — the nine effect shaders, sharing one prelude that handles
   framing, the blurred surround, and the intensity envelope.
 - `src/transitions.js` — the four transition shaders, chosen by which effect is
   arriving.
+- `src/julia.js` — solves the Julia effect's constant and camera on the CPU.
+- `src/chamber.js` — the particle simulation behind the `chamber` effect.
 - `src/show.js` — asset loading, the shuffle, the clock, and the controls.
 
 The square artwork is contained inside the wide frame so nothing is ever cropped;
@@ -95,6 +99,31 @@ into the next. There are two such pairs, one per side of a transition, so a
 feedback effect can run on both covers at once without their histories mixing.
 The slow framing breathe is held still for these effects, otherwise older stamps
 would drift out of register with the artwork under them.
+
+By default the buffer is copied straight to the screen, which works because
+datamosh's buffer *is* the frame. An effect named in `RESOLVE_EFFECTS` supplies
+its own second pass to run instead of that copy, for when the buffer holds
+something that is not a picture.
+
+**The bubble chamber.** `chamber` treats the cover as the illuminated volume of
+a particle detector. The physics is a real simulation on the CPU
+([`src/chamber.js`](src/chamber.js)) — a magnetic field bending each path,
+ionisation bleeding momentum away until the path winds up into a spiral,
+multiple scattering roughening it, delta rays flicking off the stiff tracks,
+unstable particles coming apart in flight into forks and stars. Nothing is ever
+created inside the frame: every primary is launched from outside it, so every
+vertex on the plate traces back to something that entered. Collisions are not
+detected but *scheduled* — a vertex and a moment are chosen first, and the pair
+is launched from off-frame on arcs that put them both there at that instant.
+
+Its feedback buffer holds a distortion field rather than an image: how far the
+artwork is dragged at each pixel, which way its hue is turned, and how much
+track has been laid down there. The resolve pass samples the untouched cover
+through that field. So particles *smudge* the picture along their paths instead
+of painting on it, and because the artwork is never fed back into itself it
+never degrades — the only thing that accumulates, and the only thing that heals,
+is the distortion. When the field decays to zero the frame is the clean cover
+again, pixel for pixel.
 
 ## Development
 

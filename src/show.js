@@ -3,9 +3,10 @@
 // ---------------------------------------------------------------------------
 
 import { SETLIST, SLOT_SECONDS, TRANSITION_SECONDS, FRAMING, INTENSITY, DATAMOSH_FLOW } from '../config.js';
-import { EFFECTS, EFFECT_NAMES, FEEDBACK_EFFECTS } from './effects.js';
+import { EFFECTS, EFFECT_NAMES, FEEDBACK_EFFECTS, RESOLVE_EFFECTS } from './effects.js';
 import { TRANSITIONS, transitionFor } from './transitions.js';
 import { juliaTarget, JuliaCamera } from './julia.js';
+import { Chamber, MAX_TRACKS } from './chamber.js';
 import { createContext, createScreenQuad, createTexture, draw, bindScreen, Program, Framebuffer, COPY_FRAGMENT } from './gl.js';
 
 // --- URL overrides ---------------------------------------------------------
@@ -24,6 +25,7 @@ const opts = {
   flowSpeed: num('flowspeed', DATAMOSH_FLOW.speed),
   fixedOrder: params.get('order') === 'fixed',
   hud: params.get('hud') === '1',
+  capture: params.get('capture') === '1',
   lockedEffect: (() => {
     const raw = params.get('fx');
     if (!raw) return null;
@@ -150,6 +152,7 @@ function effectAt(pos) {
 let gl = null;
 let effectPrograms = new Map();
 let transitionPrograms = new Map();
+let resolvePrograms = new Map();
 let copyProgram = null;
 let fboA = null;
 let fboB = null;
@@ -166,13 +169,14 @@ function getHistory(channel) {
       read: new Framebuffer(gl, width, height),
       write: new Framebuffer(gl, width, height),
       pos: null,
+      name: null,
     };
   }
   return histories[channel];
 }
 
 function buildGL() {
-  gl = createContext(canvas);
+  gl = createContext(canvas, opts.capture);
   createScreenQuad(gl);
   gl.disable(gl.DEPTH_TEST);
   gl.disable(gl.BLEND);
@@ -185,6 +189,10 @@ function buildGL() {
   transitionPrograms = new Map();
   for (const [name, src] of Object.entries(TRANSITIONS)) {
     transitionPrograms.set(name, new Program(gl, src, `transition:${name}`));
+  }
+  resolvePrograms = new Map();
+  for (const [name, src] of Object.entries(RESOLVE_EFFECTS)) {
+    resolvePrograms.set(name, new Program(gl, src, `resolve:${name}`));
   }
   copyProgram = new Program(gl, COPY_FRAGMENT, 'copy');
   histories[0] = histories[1] = null;
@@ -280,6 +288,25 @@ let frameDt = 0.016;
 
 const IDLE_JULIA = { cx: 0, cy: 0, x: 0, y: 0, view: 1, zb: 0 };
 
+// The bubble chamber's particles, likewise, only run for whatever is actually
+// on screen. During a transition the incoming cover's envelope is zero, so it
+// gets empty slots and draws no tracks — its exposure starts when it lands.
+const chamber = new Chamber();
+const NO_TRACKS = new Float32Array(MAX_TRACKS * 4);
+let chamberPos = null;
+
+function chamberFor(atPos, channel, live) {
+  if (!live || channel !== 0) return null;
+  if (chamberPos !== atPos) {
+    chamber.reset(seedAt(atPos));
+    chamberPos = atPos;
+  }
+  // Events are aimed at the cover panel, not at the whole 16:9 frame, so the
+  // simulation needs to know how big the panel is.
+  chamber.step(frameDt, width / Math.max(height, 1), FRAMING.fit * 0.5);
+  return chamber;
+}
+
 function juliaFor(atPos, channel) {
   if (channel !== 0) return IDLE_JULIA;
   const target = juliaTarget(clockTime, seedAt(atPos));
@@ -309,7 +336,14 @@ function renderEffect(atPos, songT, target, channel) {
       hist.write.resize(width, height);
       reset = 1;
     }
-    if (hist.pos !== atPos) { hist.pos = atPos; reset = 1; }
+    // Two feedback effects share the pair of buffers, and they read the alpha
+    // channel as different things, so switching between them mid-slot has to
+    // start clean as surely as changing cover does.
+    if (hist.pos !== atPos || hist.name !== name) {
+      hist.pos = atPos;
+      hist.name = name;
+      reset = 1;
+    }
     hist.write.bind();
   } else if (target) {
     target.bind();
@@ -318,8 +352,11 @@ function renderEffect(atPos, songT, target, channel) {
   }
 
   const jt = juliaFor(atPos, channel);
+  const ch = chamberFor(atPos, channel, name === 'chamber');
 
-  prog.use()
+  // A resolve pass gets exactly the same uniforms as the effect it belongs to,
+  // so anything the effect used to place the artwork it can place it the same.
+  const setUniforms = (p) => p.use()
     .tex('u_tex', cover.texture, 0)
     .tex('u_bg', cover.bgTexture, 1)
     .v2('u_resolution', width, height)
@@ -330,21 +367,34 @@ function renderEffect(atPos, songT, target, channel) {
     .f('u_intensity', opts.intensity)
     .f('u_seed', seedAt(atPos))
     .f('u_reset', reset)
+    .f('u_dt', frameDt)
     .v2('u_flow', opts.flowAmount, opts.flowSpeed)
     .v4('u_julia', jt.cx, jt.cy, jt.x, jt.y)
     .v2('u_juliaView', jt.view, jt.zb)
-    // Accumulated content is stored in screen space, so the slow framing
-    // breathe is held still for feedback effects — otherwise older stamps
-    // would drift out of register with the artwork underneath them.
+    .v4v('u_tracks', ch ? ch.segments : NO_TRACKS)
+    .v4v('u_trackStyle', ch ? ch.styles : NO_TRACKS)
+    // Whatever a feedback effect accumulates is stored in screen space, so the
+    // slow framing breathe is held still for them — otherwise the buffer would
+    // drift out of register with the artwork underneath it.
     .v4('u_framing', FRAMING.fit, feedback ? 0 : FRAMING.breathe,
         FRAMING.backdropDim, FRAMING.backdropZoom);
+
+  setUniforms(prog);
   if (feedback) prog.tex('u_prev', hist.read.texture, 2);
   draw(gl);
 
   if (feedback) {
     const swap = hist.read; hist.read = hist.write; hist.write = swap;
     if (target) target.bind(); else bindScreen(gl, width, height);
-    copyProgram.use().tex('u_src', hist.read.texture, 0);
+    // Effects whose buffer is already the frame just get copied out. Ones whose
+    // buffer holds something else — chamber stores a distortion field, not a
+    // picture — run their own pass to turn it into one.
+    const resolve = resolvePrograms.get(name);
+    if (resolve) {
+      setUniforms(resolve).tex('u_src', hist.read.texture, 2);
+    } else {
+      copyProgram.use().tex('u_src', hist.read.texture, 0);
+    }
     draw(gl);
   }
 }
@@ -447,7 +497,7 @@ function setHud(on) {
 // that selects it, so the whole library can be flipped through and judged
 // without touching the code.
 
-const EFFECT_KEYS = ['q', 'w', 'e', 'r', 't', 'y', 'u', 'i'];
+const EFFECT_KEYS = ['q', 'w', 'e', 'r', 't', 'y', 'u', 'i', 'o'];
 let debugOn = false;
 
 function buildDebugPanel() {

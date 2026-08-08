@@ -15,7 +15,10 @@
 //   u_seed       per-slot random value, so a repeat never looks identical
 //   u_bg         a tiny pre-blurred copy of the cover, for the surround
 //   u_framing    (fit, breathe, backdropDim, backdropZoom)
+//   u_dt         seconds since the previous frame
 // ---------------------------------------------------------------------------
+
+import { MAX_TRACKS } from './chamber.js';
 
 const PRELUDE = `
 precision highp float;
@@ -32,6 +35,11 @@ uniform float u_slotDur;
 uniform float u_intensity;
 uniform float u_seed;
 uniform vec4  u_framing;
+
+// Seconds since the previous frame. Feedback effects need it: anything that
+// decays has to decay per second, not per frame, or its timing changes with
+// the frame rate and with the adaptive render scale.
+uniform float u_dt;
 
 // Feedback effects only: last frame's output, and a flag that says to ignore it
 // and start clean (first frame of a slot, or after a resize).
@@ -581,8 +589,10 @@ void main() {
   float t = u_time * 0.25 + u_seed * 5.0;
 
   // Cell size follows the render height so the dots read the same on any
-  // display instead of vanishing on a high-DPI one.
-  float cell = u_resolution.y / mix(80.0, 165.0, 0.5 + 0.5 * sin(t * 0.5));
+  // display instead of vanishing on a high-DPI one. The count is what breathes,
+  // and it swings a long way: at the coarse end the dots are big enough to read
+  // as a pattern in their own right rather than as a texture on the artwork.
+  float cell = u_resolution.y / mix(22.0, 165.0, 0.5 + 0.5 * sin(t * 0.5));
   vec2 g = rot(t * 0.35) * (v_uv * u_resolution) / cell;
   float d = length(fract(g) - 0.5) * 2.0;
 
@@ -644,6 +654,243 @@ void main() {
 }
 `;
 
+// --- 9. Bubble chamber ----------------------------------------------------
+//
+// The cover art as the illuminated volume of a particle detector, with charged
+// particles crossing it and dragging the picture along behind them.
+//
+// The physics is on the CPU, in src/chamber.js — a real simulation, with a
+// magnetic field bending each path, ionisation bleeding momentum away until the
+// path winds up into a spiral, multiple scattering roughening it, delta rays
+// flicking off the stiff tracks, unstable particles coming apart in flight, and
+// pairs launched on arcs that put them at the same point at the same moment.
+// Per frame the shader is handed one short segment per particle. That is all it
+// knows: it has never seen a trajectory.
+//
+// THE FEEDBACK BUFFER DOES NOT HOLD A PICTURE. It holds a distortion field —
+// how far the artwork is dragged at each pixel, which way its hue is turned,
+// and how much track has been laid down there:
+//
+//   rg  displacement, signed, +/- DISP
+//   b   the hue of the track that last marked this pixel
+//   a   exposure: how hard it was marked
+//
+// Two passes. The first one is the chamber: it decays the field toward zero and
+// lets the particles write into it. The second is the camera: it samples the
+// UNTOUCHED artwork through the field and produces the frame. So the picture is
+// never fed back into itself and never degrades — resample a stored image every
+// frame for a minute and it turns to mush, however carefully you do it. Here
+// the only thing that accumulates is the distortion, and the only thing that
+// heals is the distortion.
+//
+// Which makes the self-healing exact rather than approximate. The field decays
+// on two timescales — the smear slides back into register over a few seconds,
+// the coloured track fades over ten — and when it reaches zero the frame is the
+// clean cover again, pixel for pixel, because it always was.
+const CHAMBER_CONST = `
+// Filled by the CPU simulation. Slot i holds the piece of track particle i
+// covered during THIS frame, in centred space.
+uniform vec4 u_tracks[${MAX_TRACKS}];      // (ax, ay, bx, by)
+uniform vec4 u_trackStyle[${MAX_TRACKS}];  // (hue, halfWidth, ionisation, -)
+                                           // halfWidth 0 = empty slot
+
+const float DISP  = 0.055;  // full-scale displacement the rg channels encode
+const float TURN  = 1.1;    // radians of hue rotation at full exposure
+const float LIFT  = 1.05;   // how far a track brightens or darkens what it crossed
+
+const float HEAL_SMEAR = 5.5;   // seconds for the artwork to slide back into place
+const float HEAL_TRACK = 11.0;  // seconds for the coloured track to fade out
+
+const float DRAG  = 0.85;   // how much of its own motion a particle lends the plate
+const float REACH = 2.2;    // width of the wake, in track widths
+
+const float FID_PITCH = 0.1075;   // spacing of the fiducial crosses
+const float FID_ARM   = 0.0092;   // half-length of one arm
+
+float segDist(vec2 p, vec2 a, vec2 b) {
+  vec2 pa = p - a, ba = b - a;
+  float h = clamp(dot(pa, ba) / max(dot(ba, ba), 1e-9), 0.0, 1.0);
+  return length(pa - ba * h);
+}
+
+// Saturated false colour for a track, from its hue in turns. Bubble chamber
+// plates are black and white; the colour on the famous prints was added
+// afterwards, one hue per track, so you could tell them apart.
+vec3 trackTint(float h) {
+  vec3 k = clamp(abs(mod(h * 6.0 + vec3(0.0, 4.0, 2.0), 6.0) - 3.0) - 1.0, 0.0, 1.0);
+  return mix(vec3(1.0), k, 0.88);
+}
+
+// How far into the cover panel this pixel sits. The chamber's liquid is the
+// artwork: let the drag reach the panel edge and it hauls the picture out over
+// the surround, and the cover stops being a framed picture at all.
+float insetHold(vec2 cuv) {
+  float inset = min(min(cuv.x, 1.0 - cuv.x), min(cuv.y, 1.0 - cuv.y));
+  return smoothstep(0.0, 0.09, inset);
+}
+`;
+
+// Pass 1 — the chamber. Decays the field, then lets the particles write into it.
+// Never reads the artwork at all.
+const CHAMBER = CHAMBER_CONST + `
+void main() {
+  float E = env();
+  float px = 1.0 / u_resolution.y;
+  vec2 p = toCentred(v_uv);
+
+  // A field of nothing: no displacement, no exposure.
+  if (u_reset > 0.5) { gl_FragColor = vec4(0.5, 0.5, 0.5, 0.0); return; }
+
+  vec4 f = texture2D(u_prev, v_uv);
+  vec2 disp = (f.rg - 0.5) * (2.0 * DISP);
+  float hue = f.b;
+  float expo = f.a;
+
+  // The healing. Everything the chamber does to the plate is undone at these
+  // two rates, always, whether or not anything is happening on top.
+  disp *= exp(-u_dt / HEAL_SMEAR);
+  expo *= exp(-u_dt / HEAL_TRACK);
+
+  vec2 cuv = coverUV(v_uv);
+  float held = insetHold(cuv);
+  // Tracks cross the whole frame and still register out on the surround, but
+  // only the liquid inside the chamber gets stirred.
+  float lit = mix(0.45, 1.0, panelMask(cuv)) * E;
+
+  for (int i = 0; i < ${MAX_TRACKS}; i++) {
+    vec4 st = u_trackStyle[i];
+    if (st.y > 0.0) {
+      vec4 sg = u_tracks[i];
+      float w = max(st.y, px * 0.85);
+      float d = segDist(p, sg.xy, sg.zw);
+
+      // A particle does not draw on the plate, it drags it. Each frame this
+      // pixel takes up the distance the particle actually travelled, scaled by
+      // how close it passed — so the artwork accumulates exactly as much
+      // displacement as the time it spent underneath the thing dragging it.
+      float grip = exp(-d / (w * REACH));
+      disp += (sg.zw - sg.xy) * grip * DRAG * E * held;
+
+      // Beading: a track is a string of bubbles, not a line. Hashed on screen
+      // position rather than on distance along the track, so it stays put in
+      // the frame as the particle draws through it — and on a grid that scales
+      // with the track, so the beads always read as beads instead of turning
+      // into a fixed mosaic wherever a curl tightens below the cell size.
+      float cell = hash21(floor(p / (w * 2.2)));
+      float bubbles = 0.62 + 0.38 * smoothstep(0.26, 0.44, cell);
+      float cov = (1.0 - smoothstep(w * 0.6, w * 1.35, d)) * bubbles;
+      float mark = max(cov, grip * 0.55) * lit;
+
+      // The hue channel is not a quantity and does not decay — it only records
+      // whose track this is, and stops mattering once the exposure fades.
+      hue = mix(hue, fract(st.x), clamp(mark * mark * 1.7, 0.0, 1.0));
+      expo = max(expo, mark * (0.64 + 0.36 * st.z));
+    }
+  }
+
+  disp = clamp(disp, -DISP, DISP);
+
+  // Half a bit of dither. Without it the exponential heal stalls: an 8-bit
+  // value multiplied by 0.998 rounds straight back to itself, so the plate
+  // would keep every track forever. Gated on there being something to decay,
+  // which leaves untouched artwork perfectly still and makes zero an absorbing
+  // state rather than something the noise wanders around.
+  float act = clamp(255.0 * max(expo, length(disp) / DISP), 0.0, 1.0);
+  float dither = (hash21(v_uv * u_resolution + fract(u_time) * 137.0) - 0.5) / 255.0 * act;
+
+  gl_FragColor = clamp(vec4(disp / (2.0 * DISP) + 0.5, hue, expo) + dither, 0.0, 1.0);
+}
+`;
+
+// Pass 2 — the camera. Reads the field and samples the untouched artwork
+// through it. Nothing here is ever fed back.
+const CHAMBER_RESOLVE = CHAMBER_CONST + `
+uniform sampler2D u_src;
+
+// Fiducial crosses, etched on the chamber window. Every real chamber has a grid
+// of them: they are the reference the tracks get measured against when the
+// plate is scanned, and they are the detail that says apparatus rather than
+// wallpaper. They are part of the picture, so they smear with everything else.
+float fiducials(vec2 p, float px) {
+  vec2 f = abs(fract(p / FID_PITCH + 0.5) - 0.5) * FID_PITCH;
+  float th = max(0.0010, px);
+  float a = (1.0 - smoothstep(th, th + px, f.x)) * (1.0 - smoothstep(FID_ARM, FID_ARM + px, f.y));
+  float b = (1.0 - smoothstep(th, th + px, f.y)) * (1.0 - smoothstep(FID_ARM, FID_ARM + px, f.x));
+  return max(a, b);
+}
+
+// The clean plate: what the frame is when the field has healed to nothing.
+vec3 plate(vec2 uv, float px, float E) {
+  vec2 cuv = coverUV(uv);
+  vec3 art = sampleRGB(cuv);
+
+  // Flatten the artwork slightly, so a thin coloured track still reads across a
+  // busy cover instead of disappearing into it.
+  art = mix(art, mix(art, vec3(luma(art)), 0.20) * 0.90 + 0.04, 0.38 * E);
+
+  // Dark on light art, light on dark, so the crosses never vanish.
+  float f = fiducials(toCentred(uv), px) * panelMask(cuv);
+  vec3 mark = luma(art) > 0.42 ? vec3(0.06) : vec3(0.80);
+  art = mix(art, mark, f * 0.34 * E);
+
+  return art * (1.0 - 0.24 * smoothstep(0.32, 0.95, length(toCentred(uv))));
+}
+
+void main() {
+  float E = env();
+  float px = 1.0 / u_resolution.y;
+
+  vec4 f = texture2D(u_src, v_uv);
+  vec2 disp = (f.rg - 0.5) * (2.0 * DISP);
+  float hue = f.b;
+  float expo = f.a;
+
+  vec2 duv = disp / vec2(screenAspect(), 1.0);
+
+  // A smudge, not a slide. Average the artwork all the way along the
+  // displacement instead of only at its far end, so the picture is pulled AND
+  // blurred along the track the way wet ink goes under a finger — and so the
+  // wake tapers into undisturbed cover instead of ending on a hard edge.
+  vec3 art;
+  if (length(duv) > px) {
+    art = vec3(0.0);
+    float wsum = 0.0;
+    for (int k = 0; k < 5; k++) {
+      float t = float(k) / 4.0;
+      float wgt = 1.0 - 0.5 * t;
+      art += plate(v_uv - duv * t, px, E) * wgt;
+      wsum += wgt;
+    }
+    art /= wsum;
+  } else {
+    art = plate(v_uv, px, E);
+  }
+
+  // The stain. Each track turns the hue of what it passed over in the direction
+  // its own false colour sits on the wheel, as far as its exposure took it.
+  art = hueShift(art, (hue - 0.5) * (2.0 * TURN) * expo);
+  art = clamp(mix(vec3(luma(art)), art, 1.0 + 0.5 * expo), 0.0, 1.0);
+
+  // And lifts or sinks it. Hue alone reads as a plate someone tinted; a track
+  // that also darkens or brightens what it crossed reads as one that was
+  // exposed. Driven off a different harmonic of the same hue, so which way a
+  // track goes is not predictable from its colour.
+  float lift = LIFT * sin((hue + 0.17) * TAU * 2.0) * expo;
+  art = clamp(art * (1.0 + lift) + 0.07 * lift, 0.0, 1.0);
+
+  vec3 tint = trackTint(hue);
+
+  // The bubbles themselves are the top end of the same exposure. Still the
+  // artwork underneath — but a bubble scatters the flash straight back at the
+  // camera, so the line reads bright even where the cover behind it is black.
+  float bead = smoothstep(0.44, 0.86, expo);
+  art = mix(art, clamp(art * 1.3 + tint * 0.13, 0.0, 1.0), bead);
+  art = clamp(art + tint * expo * expo * 0.04, 0.0, 1.0);
+
+  gl_FragColor = vec4(art, 1.0);
+}
+`;
+
 /** name -> full fragment shader source. Order defines the `?fx=N` indices. */
 export const EFFECTS = {
   julia:    PRELUDE + JULIA,
@@ -654,6 +901,7 @@ export const EFFECTS = {
   droste:   PRELUDE + DROSTE,
   halftone: PRELUDE + HALFTONE,
   slitscan: PRELUDE + SLITSCAN,
+  chamber:  PRELUDE + CHAMBER,
 };
 
 export const EFFECT_NAMES = Object.keys(EFFECTS);
@@ -663,4 +911,17 @@ export const EFFECT_NAMES = Object.keys(EFFECTS);
  * `u_prev` and `u_reset`, and the framing is held still for them so old
  * content stays registered with new.
  */
-export const FEEDBACK_EFFECTS = new Set(['datamosh']);
+export const FEEDBACK_EFFECTS = new Set(['datamosh', 'chamber']);
+
+/**
+ * Feedback effects whose buffer holds something that is not an image.
+ *
+ * The default handling copies the buffer straight to the screen, which only
+ * works because datamosh's buffer happens to be the frame. `chamber` stores a
+ * distortion field instead, so it needs a second pass to turn that field into
+ * a picture — given here, and run in place of the copy. It is handed the field
+ * as `u_src` along with every uniform the effect itself gets.
+ */
+export const RESOLVE_EFFECTS = {
+  chamber: PRELUDE + CHAMBER_RESOLVE,
+};

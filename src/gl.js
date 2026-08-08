@@ -23,14 +23,20 @@ uniform sampler2D u_src;
 void main() { gl_FragColor = vec4(texture2D(u_src, v_uv).rgb, 1.0); }
 `;
 
-export function createContext(canvas) {
+/**
+ * `preserveDrawingBuffer` is off for the show — it can cost a copy per frame —
+ * but with it off the canvas reads back blank to anything outside the render
+ * loop, so screenshots and screen recorders capture black. `?capture=1` turns
+ * it on for development.
+ */
+export function createContext(canvas, preserveDrawingBuffer = false) {
   const opts = {
     alpha: false,
     antialias: false,
     depth: false,
     stencil: false,
     premultipliedAlpha: false,
-    preserveDrawingBuffer: false,
+    preserveDrawingBuffer,
     powerPreference: 'high-performance',
     failIfMajorPerformanceCaveat: false,
   };
@@ -94,6 +100,13 @@ export class Program {
   v3(name, x, y, z) { const l = this.loc(name); if (l) this.gl.uniform3f(l, x, y, z); return this; }
   v4(name, x, y, z, w) { const l = this.loc(name); if (l) this.gl.uniform4f(l, x, y, z, w); return this; }
   i(name, v)        { const l = this.loc(name); if (l) this.gl.uniform1i(l, v); return this; }
+
+  /** A vec4 array. GL names an array by its first element, hence the `[0]`. */
+  v4v(name, values) {
+    const l = this.loc(`${name}[0]`);
+    if (l) this.gl.uniform4fv(l, values);
+    return this;
+  }
 
   /** Bind a texture to a unit and point the named sampler at it. */
   tex(name, texture, unit) {
