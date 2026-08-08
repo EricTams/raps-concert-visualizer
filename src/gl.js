@@ -15,6 +15,14 @@ void main() {
 }
 `;
 
+/** Straight copy of one texture to the bound target. */
+export const COPY_FRAGMENT = `
+precision mediump float;
+varying vec2 v_uv;
+uniform sampler2D u_src;
+void main() { gl_FragColor = vec4(texture2D(u_src, v_uv).rgb, 1.0); }
+`;
+
 export function createContext(canvas) {
   const opts = {
     alpha: false,

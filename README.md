@@ -83,6 +83,16 @@ image. Each frame is one draw straight to the screen, or three during a transiti
 (outgoing effect, incoming effect, composite). If the machine can't hold frame
 rate, the render resolution steps down automatically rather than stuttering.
 
+**Feedback effects.** `datamosh` renders into a buffer that survives between
+frames, so its square stamps accumulate instead of being recomputed each frame.
+Any effect named in `FEEDBACK_EFFECTS` gets a ping-pong pair of buffers, a
+`u_prev` sampler holding the last frame, and a `u_reset` flag raised on the first
+frame of a slot and after a resize — so accumulation never bleeds from one cover
+into the next. There are two such pairs, one per side of a transition, so a
+feedback effect can run on both covers at once without their histories mixing.
+The slow framing breathe is held still for these effects, otherwise older stamps
+would drift out of register with the artwork under them.
+
 ## Development
 
 ES modules need to be served over HTTP, not opened as a file:

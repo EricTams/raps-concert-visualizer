@@ -33,6 +33,11 @@ uniform float u_intensity;
 uniform float u_seed;
 uniform vec4  u_framing;
 
+// Feedback effects only: last frame's output, and a flag that says to ignore it
+// and start clean (first frame of a slot, or after a resize).
+uniform sampler2D u_prev;
+uniform float u_reset;
+
 const float TAU = 6.28318530718;
 
 float hash11(float p) {
@@ -233,34 +238,64 @@ void main() {
 `;
 
 // --- 4. Datamosh blocks ---------------------------------------------------
+//
+// A feedback effect: it renders into a buffer that survives between frames.
+//
+// Squares of assorted sizes spawn at random positions and grow to full size,
+// each painting the artwork with its RGB channels permuted. Nothing fades and
+// nothing pulses — a square simply overwrites whatever was under it, so the
+// frame accumulates a mosaic of overlapping channel-swapped patches at many
+// scales. About a third of the permutations are the identity, which repairs a
+// patch back to the original and keeps the cover from silting up entirely.
 const DATAMOSH = `
+vec3 permute(vec3 c, float w) {
+  if (w < 0.5) return c;
+  if (w < 1.5) return c.rbg;
+  if (w < 2.5) return c.grb;
+  if (w < 3.5) return c.gbr;
+  if (w < 4.5) return c.brg;
+  return c.bgr;
+}
+
+const int STAMPS = 6;
+
 void main() {
   float E = env();
-  float t = u_time;
-  float tick = floor(t * 6.0 + u_seed * 20.0);
+  vec2 uv = coverUV(v_uv);
+  vec3 src = sampleRGB(uv);
 
-  float rows = mix(58.0, 16.0, 0.5 + 0.5 * sin(t * 0.23));
-  vec2 grid = vec2(rows * screenAspect(), rows);
-  vec2 cell = floor(v_uv * grid);
-
-  vec2 h = hash22(cell + tick * 7.13);
-  float active = step(0.86, h.x);
-  vec2 off = (hash22(cell * 1.7 + tick * 3.1) - 0.5) * vec2(0.16, 0.05) * active * E;
-
-  // Smear along the displacement instead of a hard block copy.
-  vec3 col = vec3(0.0);
-  for (int s = 0; s < 4; s++) {
-    col += sampleRGB(coverUV(v_uv + off * (float(s) / 3.0)));
+  // Nothing accumulated yet, or the effect has not faded in: show the art.
+  if (u_reset > 0.5 || E < 0.02) {
+    gl_FragColor = vec4(src, 1.0);
+    return;
   }
-  col *= 0.25;
 
-  float cs = active * E * 0.022;
-  col.r = sampleRGB(coverUV(v_uv + off + vec2(cs, 0.0))).r;
-  col.b = sampleRGB(coverUV(v_uv + off - vec2(cs, 0.0))).b;
+  vec3 col = texture2D(u_prev, v_uv).rgb;
+  vec2 p = toCentred(v_uv);
 
-  // Rare per-block posterize and invert, like dropped keyframes.
-  col = mix(col, floor(col * 4.0 + 0.5) / 4.0, step(0.972, h.y) * E);
-  col = mix(col, vec3(1.0) - col, step(0.994, hash21(cell + tick)) * E * 0.85);
+  for (int i = 0; i < STAMPS; i++) {
+    float fi = float(i);
+
+    // Each slot respawns on its own period, so they never march in step.
+    float period = mix(1.5, 0.5, hash11(fi * 3.7 + u_seed));
+    float phase = u_time / period + fi * 0.37;
+    vec2 key = vec2(floor(phase), fi * 17.0 + u_seed * 91.0);
+    float life = fract(phase);
+
+    vec2 c = (hash22(key) - 0.5) * vec2(screenAspect() * 1.04, 1.04);
+
+    // Sizes biased small so big squares stay occasional events.
+    float full = mix(0.05, 0.62, pow(hash21(key + 3.1), 2.2)) * E;
+    float size = full * (0.18 + 0.82 * smoothstep(0.0, 0.55, life));
+
+    vec2 d = abs(p - c);
+    float inside = step(max(d.x, d.y), size * 0.5);
+
+    float pick = hash21(key + 7.7);
+    float which = (pick < 0.34) ? 0.0 : min(5.0, floor(1.0 + (pick - 0.34) / 0.66 * 5.0));
+
+    col = mix(col, permute(src, which), inside);
+  }
 
   gl_FragColor = vec4(col, 1.0);
 }
@@ -402,3 +437,10 @@ export const EFFECTS = {
 };
 
 export const EFFECT_NAMES = Object.keys(EFFECTS);
+
+/**
+ * Effects that render into a buffer surviving between frames. They receive
+ * `u_prev` and `u_reset`, and the framing is held still for them so old
+ * content stays registered with new.
+ */
+export const FEEDBACK_EFFECTS = new Set(['datamosh']);

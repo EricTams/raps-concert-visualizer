@@ -3,9 +3,9 @@
 // ---------------------------------------------------------------------------
 
 import { SETLIST, SLOT_SECONDS, TRANSITION_SECONDS, FRAMING, INTENSITY } from '../config.js';
-import { EFFECTS, EFFECT_NAMES } from './effects.js';
+import { EFFECTS, EFFECT_NAMES, FEEDBACK_EFFECTS } from './effects.js';
 import { TRANSITIONS, transitionFor } from './transitions.js';
-import { createContext, createScreenQuad, createTexture, draw, bindScreen, Program, Framebuffer } from './gl.js';
+import { createContext, createScreenQuad, createTexture, draw, bindScreen, Program, Framebuffer, COPY_FRAGMENT } from './gl.js';
 
 // --- URL overrides ---------------------------------------------------------
 
@@ -147,8 +147,26 @@ function effectAt(pos) {
 let gl = null;
 let effectPrograms = new Map();
 let transitionPrograms = new Map();
+let copyProgram = null;
 let fboA = null;
 let fboB = null;
+
+// Feedback effects need a buffer that survives between frames. Channel 0 is
+// whatever is playing, channel 1 the cover arriving during a transition, so a
+// feedback effect on both sides of a handoff keeps two separate accumulations.
+// Allocated only if a feedback effect actually runs.
+const histories = [null, null];
+
+function getHistory(channel) {
+  if (!histories[channel]) {
+    histories[channel] = {
+      read: new Framebuffer(gl, width, height),
+      write: new Framebuffer(gl, width, height),
+      pos: null,
+    };
+  }
+  return histories[channel];
+}
 
 function buildGL() {
   gl = createContext(canvas);
@@ -165,6 +183,8 @@ function buildGL() {
   for (const [name, src] of Object.entries(TRANSITIONS)) {
     transitionPrograms.set(name, new Program(gl, src, `transition:${name}`));
   }
+  copyProgram = new Program(gl, COPY_FRAGMENT, 'copy');
+  histories[0] = histories[1] = null;
 
   for (const cover of playable) {
     cover.texture = createTexture(gl, cover.image);
@@ -246,10 +266,29 @@ function commitAdvance() {
 
 // --- Rendering -------------------------------------------------------------
 
-function renderEffect(atPos, songT, target) {
+function renderEffect(atPos, songT, target, channel) {
   const cover = coverAt(atPos);
-  const prog = effectPrograms.get(effectAt(atPos));
-  if (target) target.bind(); else bindScreen(gl, width, height);
+  const name = effectAt(atPos);
+  const prog = effectPrograms.get(name);
+  const feedback = FEEDBACK_EFFECTS.has(name);
+
+  let hist = null;
+  let reset = 0;
+  if (feedback) {
+    hist = getHistory(channel);
+    if (hist.read.width !== width || hist.read.height !== height) {
+      hist.read.resize(width, height);
+      hist.write.resize(width, height);
+      reset = 1;
+    }
+    if (hist.pos !== atPos) { hist.pos = atPos; reset = 1; }
+    hist.write.bind();
+  } else if (target) {
+    target.bind();
+  } else {
+    bindScreen(gl, width, height);
+  }
+
   prog.use()
     .tex('u_tex', cover.texture, 0)
     .tex('u_bg', cover.bgTexture, 1)
@@ -260,22 +299,35 @@ function renderEffect(atPos, songT, target) {
     .f('u_slotDur', opts.slotDur)
     .f('u_intensity', opts.intensity)
     .f('u_seed', seedAt(atPos))
-    .v4('u_framing', FRAMING.fit, FRAMING.breathe, FRAMING.backdropDim, FRAMING.backdropZoom);
+    .f('u_reset', reset)
+    // Accumulated content is stored in screen space, so the slow framing
+    // breathe is held still for feedback effects — otherwise older stamps
+    // would drift out of register with the artwork underneath them.
+    .v4('u_framing', FRAMING.fit, feedback ? 0 : FRAMING.breathe,
+        FRAMING.backdropDim, FRAMING.backdropZoom);
+  if (feedback) prog.tex('u_prev', hist.read.texture, 2);
   draw(gl);
+
+  if (feedback) {
+    const swap = hist.read; hist.read = hist.write; hist.write = swap;
+    if (target) target.bind(); else bindScreen(gl, width, height);
+    copyProgram.use().tex('u_src', hist.read.texture, 0);
+    draw(gl);
+  }
 }
 
 function renderFrame() {
   const t = songTime();
 
   if (!isTransitioning()) {
-    renderEffect(pos, t, null);
+    renderEffect(pos, t, null, 0);
     return;
   }
 
   // Outgoing at its own slot time; incoming counts up to zero, so it arrives
   // clean and its effect grows in once the handoff completes.
-  renderEffect(pos, t, fboA);
-  renderEffect(pendingPos, t - opts.slotDur, fboB);
+  renderEffect(pos, t, fboA, 0);
+  renderEffect(pendingPos, t - opts.slotDur, fboB, 1);
 
   const mix = (t - transitionStart()) / opts.transDur;
   const prog = transitionPrograms.get(transitionFor(effectAt(pendingPos)));
