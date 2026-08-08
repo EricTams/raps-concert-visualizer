@@ -210,9 +210,20 @@ void main() {
   // the bands as the view widens so the density of structure on screen stays
   // roughly constant across the whole zoom cycle.
   float bandWidth = mix(0.55, 1.6, u_juliaView.y);
+  float phase = mu / bandWidth;
 
-  vec3 col = mix(src, treat(src, floor(mu / bandWidth)), escaped);
-  gl_FragColor = vec4(mix(src, col, E), 1.0);
+  vec3 col = treat(src, floor(phase));
+
+  // A continuous grade under the discrete bands, driven by the same escape
+  // count. The bands give hard fractal edges; this gives the smooth colour
+  // flow between them that makes the contours read as depth rather than as
+  // flat stencils. Hue turns through the escape count and brightness swells
+  // within each band, so the two structures reinforce rather than fight.
+  col = hueShift(col, sin(phase * 0.5 + u_time * 0.25) * 0.55);
+  col *= 0.86 + 0.28 * fract(phase);
+
+  col = mix(src, col, escaped);
+  gl_FragColor = vec4(mix(src, clamp(col, 0.0, 1.0), E), 1.0);
 }
 `;
 

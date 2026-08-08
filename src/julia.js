@@ -82,8 +82,57 @@ function walkToBoundary(cx, cy, seedBits, prev) {
   return { x: zx, y: zy, traj };
 }
 
-// Trajectory carried between frames so the target evolves continuously. Reset
-// when the cycle index advances, which is the deliberate re-aim.
+// ---------------------------------------------------------------------------
+// Choosing which boundary point to aim at.
+//
+// Any point of the boundary has infinite detail arbitrarily close to it, so
+// "on the boundary" is not on its own a useful standard. Inverse iteration
+// samples the boundary by harmonic measure, which readily lands out on a bare
+// filament at the edge of the set with nothing else in view — technically
+// interesting, visually dead, and it puts all the drama off screen.
+//
+// So audition a batch and keep a good one. Two things make a point good:
+// sitting near the middle of the set, and having plenty of other boundary
+// nearby. The second is nearly free — the candidates are themselves a sample
+// of the boundary, so counting how many fall within a view of each other
+// measures local busyness directly.
+//
+// Both measures are taken relative to the set's own extent, because these
+// Julia sets range from fat connected blobs to sparse dust and a fixed
+// distance would mean quite different things for each.
+// ---------------------------------------------------------------------------
+
+const CANDIDATES = 32;
+const SHORTLIST = 6;          // pick among this many best, so it still varies
+const NEIGHBOUR_RADIUS = 0.35; // as a fraction of the set's extent
+const RADIUS_WEIGHT = 1.25;    // how strongly to prefer the middle
+
+function chooseBits(cx, cy, n) {
+  const pts = [];
+  let extent = 1e-6;
+  for (let k = 0; k < CANDIDATES; k++) {
+    const bits = Math.imul(Math.imul(n, 2654435761) + Math.imul(k, 40503), 2246822519);
+    const p = walkToBoundary(cx, cy, bits, null);
+    const r = Math.hypot(p.x, p.y);
+    if (r > extent) extent = r;
+    pts.push({ bits, x: p.x, y: p.y, r, score: 0 });
+  }
+
+  const near = NEIGHBOUR_RADIUS * extent;
+  for (const p of pts) {
+    let busy = 0;
+    for (const q of pts) {
+      if (q !== p && Math.hypot(q.x - p.x, q.y - p.y) < near) busy++;
+    }
+    p.score = busy / (CANDIDATES - 1) - RADIUS_WEIGHT * (p.r / extent);
+  }
+
+  pts.sort((a, b) => b.score - a.score);
+  return pts[(Math.imul(n, 22695477) >>> 0) % SHORTLIST].bits;
+}
+
+// Chosen point and its trajectory, carried between frames so the target
+// evolves continuously. Re-chosen when the cycle index advances.
 let walkState = null;
 
 /**
@@ -100,14 +149,14 @@ export function juliaTarget(time, seed) {
   const n = Math.floor(cyc);
   const f = cyc - n;
 
-  // A new cycle index means a deliberate re-aim, so the trajectory starts
-  // fresh from the seed rather than tracking the old point. The index turns
-  // over at f = 0, the widest point of the zoom, so the flight across happens
-  // while pulled back and the push-in lands on the new point.
+  // A new cycle index means a deliberate re-aim, so a fresh point is auditioned
+  // rather than the old one tracked. The index turns over at f = 0, the widest
+  // point of the zoom, so the flight across happens while pulled back and the
+  // push-in lands on the new point.
   if (!walkState || walkState.seed !== seed || walkState.n !== n) {
-    walkState = { seed, n, traj: null };
+    walkState = { seed, n, traj: null, bits: chooseBits(cx, cy, n) };
   }
-  const p = walkToBoundary(cx, cy, Math.imul(n, 2654435761), walkState.traj);
+  const p = walkToBoundary(cx, cy, walkState.bits, walkState.traj);
   walkState.traj = p.traj;
 
   return { cx, cy, x: p.x, y: p.y, view: viewAt(f), zb: zoomAt(f) };
