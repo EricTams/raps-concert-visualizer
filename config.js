@@ -49,6 +49,17 @@ export const FRAMING = {
   backdropZoom: 1.7,
 };
 
+// The flow field the datamosh effect drags the artwork along.
+// Override live without editing anything: ?flow=0.2&flowspeed=0.09
+export const DATAMOSH_FLOW = {
+  // How far the artwork drifts, as a fraction of its width. This is the dial
+  // that matters — 0.04 is a slow sway, 0.12 a visible slosh, 0.3 a churn.
+  amount: 0.12,
+  // How fast the field itself rearranges. Too high and it shimmers rather
+  // than flows, because the direction reverses before the eye tracks it.
+  speed: 0.055,
+};
+
 // Global intensity multiplier for every effect. Turn down if it reads as too busy
 // on a big projector, up if it looks tame in the room.
 export const INTENSITY = 1.0;

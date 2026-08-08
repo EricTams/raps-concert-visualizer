@@ -2,7 +2,7 @@
 // The show: asset loading, scheduling, rendering, and operator controls.
 // ---------------------------------------------------------------------------
 
-import { SETLIST, SLOT_SECONDS, TRANSITION_SECONDS, FRAMING, INTENSITY } from '../config.js';
+import { SETLIST, SLOT_SECONDS, TRANSITION_SECONDS, FRAMING, INTENSITY, DATAMOSH_FLOW } from '../config.js';
 import { EFFECTS, EFFECT_NAMES, FEEDBACK_EFFECTS } from './effects.js';
 import { TRANSITIONS, transitionFor } from './transitions.js';
 import { createContext, createScreenQuad, createTexture, draw, bindScreen, Program, Framebuffer, COPY_FRAGMENT } from './gl.js';
@@ -19,6 +19,8 @@ const opts = {
   slotDur: Math.max(1, num('dur', SLOT_SECONDS)),
   transDur: Math.max(0.2, num('trans', TRANSITION_SECONDS)),
   intensity: num('intensity', INTENSITY),
+  flowAmount: num('flow', DATAMOSH_FLOW.amount),
+  flowSpeed: num('flowspeed', DATAMOSH_FLOW.speed),
   fixedOrder: params.get('order') === 'fixed',
   hud: params.get('hud') === '1',
   lockedEffect: (() => {
@@ -300,6 +302,7 @@ function renderEffect(atPos, songT, target, channel) {
     .f('u_intensity', opts.intensity)
     .f('u_seed', seedAt(atPos))
     .f('u_reset', reset)
+    .v2('u_flow', opts.flowAmount, opts.flowSpeed)
     // Accumulated content is stored in screen space, so the slow framing
     // breathe is held still for feedback effects — otherwise older stamps
     // would drift out of register with the artwork underneath them.

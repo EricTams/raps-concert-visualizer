@@ -38,6 +38,9 @@ uniform vec4  u_framing;
 uniform sampler2D u_prev;
 uniform float u_reset;
 
+// Datamosh flow field: (amount, speed). See DATAMOSH_FLOW in config.js.
+uniform vec2 u_flow;
+
 const float TAU = 6.28318530718;
 
 float hash11(float p) {
@@ -241,18 +244,19 @@ void main() {
 //
 // A feedback effect: it renders into a buffer that survives between frames.
 //
-// Squares of assorted sizes spawn at random positions and grow to full size,
-// each painting the artwork with its RGB channels permuted. Nothing fades and
-// nothing pulses — a square simply overwrites whatever was under it, so the
-// frame accumulates a mosaic of overlapping channel-swapped patches at many
-// scales. About a third of the permutations are the identity, which repairs a
-// patch back to the original and keeps the cover from silting up entirely.
+// The whole artwork drifts along a flow field, live, every frame. On top of
+// that, squares of assorted sizes spawn and grow, each claiming its area for
+// one RGB channel permutation. Nothing fades and nothing pulses — a square
+// simply overwrites whatever was under it, so the frame accumulates a mosaic
+// of overlapping channel-swapped regions at many scales. About a third of the
+// permutations are the identity, which hands a patch back to its true colours.
+//
+// What persists between frames is the permutation MAP, not the pixels: the
+// buffer's alpha channel holds which swap applies where, and the colour is
+// recomputed each frame from the moving artwork. Storing composited pixels
+// instead would freeze every region until a stamp happened to land on it,
+// which stops the picture reading as moving at all.
 const DATAMOSH = `
-// Flow: how far the artwork drifts, as a fraction of its width, and how fast
-// the field itself evolves. These two numbers are the whole feel of it.
-const float FLOW_AMOUNT = 0.045;
-const float FLOW_SPEED  = 0.030;
-
 // Only three octaves, sampled over a wide epsilon. The potential has to be
 // SMOOTH: take the gradient of the full five-octave fbm over a small epsilon
 // and the finest octaves dominate it, which marbles the artwork into
@@ -275,7 +279,7 @@ float flowNoise(vec2 p) {
 // Neighbouring patches therefore disagree about where the image is, and that
 // disagreement is the point — it is what real datamoshing looks like.
 vec2 curlFlow(vec2 p) {
-  vec2 drift = vec2(u_time * FLOW_SPEED, u_time * -FLOW_SPEED * 0.7);
+  vec2 drift = vec2(u_time * u_flow.y, u_time * -u_flow.y * 0.7);
   float e = 0.08;
   float n0 = flowNoise(p + drift);
   float nx = flowNoise(p + vec2(e, 0.0) + drift);
@@ -294,7 +298,12 @@ vec3 permute(vec3 c, float w) {
   return c.bgr;
 }
 
-const int STAMPS = 6;
+const int STAMPS = 12;
+
+// The permutation id rides in the buffer's alpha channel. Six values spread
+// across eight slots, so 8-bit rounding can never tip one into its neighbour.
+float encodeId(float w) { return (w + 0.5) / 8.0; }
+float decodeId(float a) { return floor(a * 8.0); }
 
 void main() {
   float E = env();
@@ -303,18 +312,18 @@ void main() {
   // Fade the flow out toward the panel edge, so the cover stays a crisp
   // rectangle on its surround while its contents move inside it.
   float inset = min(min(uv.x, 1.0 - uv.x), min(uv.y, 1.0 - uv.y));
-  float atten = smoothstep(0.0, 0.10, inset);
+  float atten = smoothstep(0.0, 0.14, inset);
 
-  vec2 flow = curlFlow(uv * 1.6) * FLOW_AMOUNT * atten * E;
-  vec3 src = sampleRGB(uv + flow);
+  vec2 flow = curlFlow(uv * 1.6) * u_flow.x * atten * E;
+  vec3 src = sampleRGB(uv + flow);   // the moving artwork, resampled every frame
 
-  // Nothing accumulated yet, or the effect has not faded in: show the art.
+  // Nothing claimed yet, or the effect has not faded in: show the art as-is.
   if (u_reset > 0.5 || E < 0.02) {
-    gl_FragColor = vec4(src, 1.0);
+    gl_FragColor = vec4(src, encodeId(0.0));
     return;
   }
 
-  vec3 col = texture2D(u_prev, v_uv).rgb;
+  float id = decodeId(texture2D(u_prev, v_uv).a);
   vec2 p = toCentred(v_uv);
 
   for (int i = 0; i < STAMPS; i++) {
@@ -338,10 +347,10 @@ void main() {
     float pick = hash21(key + 7.7);
     float which = (pick < 0.34) ? 0.0 : min(5.0, floor(1.0 + (pick - 0.34) / 0.66 * 5.0));
 
-    col = mix(col, permute(src, which), inside);
+    id = mix(id, which, inside);
   }
 
-  gl_FragColor = vec4(col, 1.0);
+  gl_FragColor = vec4(permute(src, id), encodeId(id));
 }
 `;
 
