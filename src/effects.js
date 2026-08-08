@@ -447,12 +447,21 @@ void main() {
 const SLITSCAN = `
 void main() {
   float E = env();
-  float t = u_time;
 
-  float horiz = step(0.5, fract(t * 0.055 + u_seed * 3.0));  // alternate axis
+  // One cycle smears all the way out and all the way back. A raised cosine
+  // rather than a sawtooth, so the frame unwinds to the original instead of
+  // snapping to it, and the turnaround at full smear has zero velocity.
+  float cyc = u_time * 0.17 + u_seed * 4.0;
+  float n = floor(cyc);
+  float ramp = 0.5 - 0.5 * cos(fract(cyc) * TAU);
+
+  // Axis and direction are drawn once per cycle, so they only ever change at
+  // the instant the smear is fully undone and the switch is invisible.
+  float horiz = step(0.5, hash11(n + u_seed * 13.0));
+  float dir = (hash11(n + 41.0) < 0.5) ? -1.0 : 1.0;
+
   float axis = mix(v_uv.y, v_uv.x, horiz);
-  float ramp = smoothstep(0.0, 0.75, fract(t * 0.28));       // builds, then snaps
-  float lag = (axis - 0.5) * 1.6 * ramp;
+  float lag = (axis - 0.5) * 1.6 * ramp * dir;
 
   vec3 col = vec3(0.0);
   float wsum = 0.0;
