@@ -324,7 +324,10 @@ void main() {
   float E = env();
   vec2 uv = coverUV(v_uv);
   vec2 p = uv - 0.5;
-  float t = u_time * 0.10 + u_seed * 13.0;
+  // Everything below runs off this one clock — spin, drift, breathing, hue and
+  // the segment count — so it is the single dial for how fast the whole thing
+  // moves, and nothing can drift out of proportion with anything else.
+  float t = u_time * 0.15 + u_seed * 13.0;
 
   // The segment count wants to drift, but a kaleidoscope only exists at whole
   // numbers of segments: flooring a drifting count re-cuts the whole mandala in
