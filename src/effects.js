@@ -285,24 +285,39 @@ const KALEIDO = `
 // Folds within the artwork itself rather than across the screen, so the cover
 // stays a clean panel on its surround while its contents become a mandala.
 
+// Reflect a value back into 0..1 instead of wrapping it: 1.2 comes back as
+// 0.8, 2.3 as 0.3. That is what a mirror does, and it is continuous at every
+// turning point, so nothing built on it can seam.
+float mirrorFold(float x) { return abs(x - 2.0 * floor(x * 0.5 + 0.5)); }
+
 // One mandala at one whole segment count.
 //
-// The fold is done in turns rather than radians. atan's branch cut wraps by
-// exactly one turn, and one turn times a whole segment count is exactly a whole
-// number, so the two sides of the cut agree to the last bit. The same fold
-// written in radians relies on TAU / n * n landing back on TAU, which it does
-// not, and the miss shows as a hairline seam along one ray of the mandala.
+// The angular fold is done in turns rather than radians. atan's branch cut
+// wraps by exactly one turn, and one turn times a whole segment count is
+// exactly a whole number, so the two sides of the cut agree to the last bit.
+// The same fold written in radians relies on TAU / n * n landing back on TAU,
+// which it does not, and the miss shows as a hairline seam along one ray.
 vec3 mandala(vec2 uv, float n, float ang, float r, float spin, float t, float E, float m) {
-  // Triangle wave, so each wedge is the mirror of its neighbour. Continuous at
-  // every wedge edge, including the one the branch cut falls on.
-  float tri = abs(fract(ang / TAU * n + 0.5) - 0.5) * 2.0;
+  // 0 at one mirror, 1 at the next, so each wedge is its neighbour reversed.
+  float tri = mirrorFold(ang / TAU * n * 2.0);
   float a = tri * TAU * 0.5 / n;
 
   vec2 k = rot(spin) * vec2(cos(a), sin(a)) * r;
   vec2 fuv = mix(uv, k + 0.5, m);
 
-  vec3 col = sampleChroma(fuv, vec2(0.004, 0.0) * E);
-  return hueShift(col, (a * 0.25 + t * 0.12) * E);
+  // Dispersion grows with radius and vanishes at the centre, the way it does
+  // looking through real glass.
+  vec3 col = sampleChroma(fuv, k * 0.014 * E);
+
+  // Hue turns across a facet and turns back at the mirror, so the colour folds
+  // with the geometry instead of sliding over the top of it.
+  col = hueShift(col, (tri * 0.45 + t * 0.12) * E);
+
+  // The mirrors themselves. A real kaleidoscope shows you its glass — a bright
+  // line where two facets meet. Multiplied rather than added, so it lifts what
+  // is already there instead of laying white over a dark cover.
+  float seam = smoothstep(0.05, 0.0, min(tri, 1.0 - tri));
+  return col * (1.0 + seam * 0.45 * E);
 }
 
 void main() {
@@ -317,14 +332,28 @@ void main() {
   // drift are built and dissolved between. The window is narrow and sits away
   // from the ends of the drift, so each symmetry holds for most of its turn and
   // then ghosts into the next rather than the pair being permanently half-mixed.
-  float segs = mix(4.0, 8.0, 0.5 + 0.5 * sin(t * 0.37));
+  float segs = mix(6.0, 12.0, 0.5 + 0.5 * sin(t * 0.37));
   float n = floor(segs);
   float w = smoothstep(0.42, 0.58, fract(segs));
 
   float ang = atan(p.y, p.x) + t * 0.25;
-  float r = length(p) * (0.90 + 0.12 * sin(t * 0.9));
+
+  // Light bouncing between the mirrors more than once tiles the object plane
+  // outward as well as around. Reflecting the radius is that second bounce:
+  // past the ring the pattern turns back on itself rather than running out of
+  // artwork, and each facet shows a magnified detail instead of the whole cover
+  // squeezed into a wedge. That is most of what separates this from one fold.
+  // It also keeps every sample inside the panel, so the blurred surround can
+  // never appear as a dark wedge in the middle of the mandala.
+  const float RING = 0.40;
+  float r = mirrorFold(length(p) * (0.90 + 0.12 * sin(t * 0.9)) / RING) * RING;
+
   float spin = t * 0.18;
-  float m = panelMask(uv) * E * 0.85;
+
+  // Fold all the way. Blending folded coordinates with unfolded ones leaves a
+  // ghost of the original sitting under the mandala, and a mirror that is only
+  // mostly a mirror reads as a warp rather than as glass.
+  float m = panelMask(uv) * clamp(E, 0.0, 1.0);
 
   vec3 col = mix(mandala(uv, n,       ang, r, spin, t, E, m),
                  mandala(uv, n + 1.0, ang, r, spin, t, E, m), w);
