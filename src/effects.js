@@ -284,25 +284,51 @@ void main() {
 const KALEIDO = `
 // Folds within the artwork itself rather than across the screen, so the cover
 // stays a clean panel on its surround while its contents become a mandala.
+
+// One mandala at one whole segment count.
+//
+// The fold is done in turns rather than radians. atan's branch cut wraps by
+// exactly one turn, and one turn times a whole segment count is exactly a whole
+// number, so the two sides of the cut agree to the last bit. The same fold
+// written in radians relies on TAU / n * n landing back on TAU, which it does
+// not, and the miss shows as a hairline seam along one ray of the mandala.
+vec3 mandala(vec2 uv, float n, float ang, float r, float spin, float t, float E, float m) {
+  // Triangle wave, so each wedge is the mirror of its neighbour. Continuous at
+  // every wedge edge, including the one the branch cut falls on.
+  float tri = abs(fract(ang / TAU * n + 0.5) - 0.5) * 2.0;
+  float a = tri * TAU * 0.5 / n;
+
+  vec2 k = rot(spin) * vec2(cos(a), sin(a)) * r;
+  vec2 fuv = mix(uv, k + 0.5, m);
+
+  vec3 col = sampleChroma(fuv, vec2(0.004, 0.0) * E);
+  return hueShift(col, (a * 0.25 + t * 0.12) * E);
+}
+
 void main() {
   float E = env();
   vec2 uv = coverUV(v_uv);
   vec2 p = uv - 0.5;
   float t = u_time * 0.10 + u_seed * 13.0;
 
-  float segs = floor(mix(4.0, 8.0, 0.5 + 0.5 * sin(t * 0.37)));
-  float seg = TAU / segs;
-  float a = atan(p.y, p.x) + t * 0.25;
+  // The segment count wants to drift, but a kaleidoscope only exists at whole
+  // numbers of segments: flooring a drifting count re-cuts the whole mandala in
+  // a single frame, and that is the jump. So both counts either side of the
+  // drift are built and dissolved between. The window is narrow and sits away
+  // from the ends of the drift, so each symmetry holds for most of its turn and
+  // then ghosts into the next rather than the pair being permanently half-mixed.
+  float segs = mix(4.0, 8.0, 0.5 + 0.5 * sin(t * 0.37));
+  float n = floor(segs);
+  float w = smoothstep(0.42, 0.58, fract(segs));
+
+  float ang = atan(p.y, p.x) + t * 0.25;
   float r = length(p) * (0.90 + 0.12 * sin(t * 0.9));
-
-  a = abs(mod(a, seg) - seg * 0.5);
-  vec2 k = rot(t * 0.18) * vec2(cos(a), sin(a)) * r;
-
+  float spin = t * 0.18;
   float m = panelMask(uv) * E * 0.85;
-  vec2 fuv = mix(uv, k + 0.5, m);
 
-  vec3 col = sampleChroma(fuv, vec2(0.004, 0.0) * E);
-  col = hueShift(col, (a * 0.25 + t * 0.12) * E);
+  vec3 col = mix(mandala(uv, n,       ang, r, spin, t, E, m),
+                 mandala(uv, n + 1.0, ang, r, spin, t, E, m), w);
+
   col *= 1.0 + 0.10 * E * sin(r * 26.0 - t * 3.0);
 
   gl_FragColor = vec4(col, 1.0);
