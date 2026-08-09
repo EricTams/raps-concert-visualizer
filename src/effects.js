@@ -310,8 +310,10 @@ vec3 mandala(vec2 uv, float n, float ang, float r, float spin, float t, float E,
   vec3 col = sampleChroma(fuv, k * 0.014 * E);
 
   // Hue turns across a facet and turns back at the mirror, so the colour folds
-  // with the geometry instead of sliding over the top of it.
-  col = hueShift(col, (tri * 0.45 + t * 0.12) * E);
+  // with the geometry instead of sliding over the top of it. Kept small: the
+  // geometry is doing the work now, and colour that swings hard on top of it
+  // fights the folding rather than marking it.
+  col = hueShift(col, (tri * 0.22 + t * 0.07) * E);
 
   // The mirrors themselves. A real kaleidoscope shows you its glass — a bright
   // line where two facets meet. Multiplied rather than added, so it lifts what
