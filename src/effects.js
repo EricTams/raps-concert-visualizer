@@ -313,7 +313,7 @@ vec3 mandala(vec2 uv, float n, float ang, float r, float spin, float t, float E,
   // with the geometry instead of sliding over the top of it. Kept small: the
   // geometry is doing the work now, and colour that swings hard on top of it
   // fights the folding rather than marking it.
-  col = hueShift(col, (tri * 0.22 + t * 0.07) * E);
+  col = hueShift(col, (tri * 0.22 + t * 0.035) * E);
 
   // The mirrors themselves. A real kaleidoscope shows you its glass — a bright
   // line where two facets meet. Multiplied rather than added, so it lifts what
@@ -326,10 +326,13 @@ void main() {
   float E = env();
   vec2 uv = coverUV(v_uv);
   vec2 p = uv - 0.5;
-  // Everything below runs off this one clock — spin, drift, breathing, hue and
-  // the segment count — so it is the single dial for how fast the whole thing
-  // moves, and nothing can drift out of proportion with anything else.
-  float t = u_time * 0.15 + u_seed * 13.0;
+  // Spin, drift, breathing and shimmer all run off this one clock, so it is the
+  // dial for how fast the thing moves and they cannot get out of proportion
+  // with each other. Two things deliberately do not ride it: the segment count
+  // and the hue drift, whose own coefficients are divided back down whenever
+  // this changes. Neither is movement. Re-cutting the symmetry oftener is
+  // churn, and the hue rate was set by hand where it was wanted.
+  float t = u_time * 0.30 + u_seed * 13.0;
 
   // The segment count wants to drift, but a kaleidoscope only exists at whole
   // numbers of segments: flooring a drifting count re-cuts the whole mandala in
@@ -337,9 +340,12 @@ void main() {
   // drift are built and dissolved between. The window is narrow and sits away
   // from the ends of the drift, so each symmetry holds for most of its turn and
   // then ghosts into the next rather than the pair being permanently half-mixed.
-  float segs = mix(6.0, 12.0, 0.5 + 0.5 * sin(t * 0.37));
+  // Held at about one dissolve every second and a half: much quicker and the
+  // handover stops reading as a handover and starts reading as the cut it is
+  // there to avoid.
+  float segs = mix(6.0, 12.0, 0.5 + 0.5 * sin(t * 0.18));
   float n = floor(segs);
-  float w = smoothstep(0.42, 0.58, fract(segs));
+  float w = smoothstep(0.38, 0.62, fract(segs));
 
   float ang = atan(p.y, p.x) + t * 0.25;
 
